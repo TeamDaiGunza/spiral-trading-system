@@ -527,6 +527,17 @@ button:focus-visible { outline: 1px solid var(--orange); outline-offset: 2px; }
 .panel-tab { transition: all .15s; }
 .panel-tab:hover { color: var(--orange) !important; }
 
+/* ── PANEL CONTENT NEVER SQUISHES ── */
+.panel-section > div { min-height: 0; }
+.panel-section > div > * { flex-shrink: 0; }
+#psec-analytics > div, #psec-settings > div, #psec-positions > div {
+  display: block !important;
+  overflow-y: auto;
+  min-height: 100%;
+}
+/* Analytics cards never collapse */
+.analytics-card, .market-intel, .perf-summary { min-height: 0; flex-shrink: 0; }
+
 /* ── DASHBOARD FIXED HEIGHT ── */
 #psec-dashboard {
   display: flex;
@@ -1223,7 +1234,7 @@ MIIEowIBAAKCAQEA...
 
       <!-- ANALYTICS tab -->
       <div class="panel-section" id="psec-analytics">
-        <div style="padding:12px;overflow-y:auto;height:100%;box-sizing:border-box">
+        <div style="padding:12px;box-sizing:border-box;min-height:100%">
           <div class="card-title" style="margin-bottom:10px">MARKET INTELLIGENCE</div>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;margin-bottom:16px">
             <div style="background:rgba(0,0,0,0.4);border:1px solid var(--bd);padding:10px">
@@ -5860,8 +5871,8 @@ function switchPanel(tab) {
     secEl.style.flex = '1';
     secEl.style.minHeight = '0';
     // Scrollable tabs get overflow:auto, others hidden
-    var scrollTabs = ['settings', 'analytics', 'positions'];
-    secEl.style.overflow = scrollTabs.indexOf(tab) >= 0 ? 'auto' : 'hidden';
+    // Dashboard manages its own internal scroll areas — all others scroll freely
+    secEl.style.overflow = tab === 'dashboard' ? 'hidden' : 'auto';
   }
   if (tab === 'signals') syncSignalListFull();
   if (tab === 'analytics') { updateAnalytics(); setTimeout(updateIndicatorCharts, 150); }
