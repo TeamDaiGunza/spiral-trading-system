@@ -284,7 +284,7 @@ button:active{transform:scale(0.97)}
 .kv{color:var(--orange2);font-weight:700;text-shadow:0 0 8px rgba(255,136,0,0.5)}
 
 /* ── SIGNALS ── */
-.signal-list{display:flex;flex-direction:column;gap:4px;max-height:340px;overflow-y:auto}
+.signal-list{display:flex;flex-direction:column;gap:4px;overflow-y:visible}
 .signal{
   display:flex;align-items:center;gap:6px;padding:6px 8px;
   border:1px solid var(--bd);font-size:11px;
@@ -567,7 +567,7 @@ button:focus-visible { outline: 1px solid var(--orange); outline-offset: 2px; }
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
 }
 #psec-dashboard .log-col {
   padding: 12px;
@@ -1103,11 +1103,21 @@ MIIEowIBAAKCAQEA...
           <div class="risk-col" style="display:flex;flex-direction:column;gap:10px">
 
             <!-- PREDICTION vs REALITY chart -->
-            <div class="card-title" style="margin-bottom:2px">📈 PREDICTION vs REALITY</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+              <div class="card-title">📈 PREDICTION vs REALITY</div>
+              <select id="predCoinFilter" onchange="drawPredictionChart()" style="font-family:var(--display);font-size:8px;background:rgba(0,0,0,0.6);border:1px solid var(--bd2);color:var(--tx2);padding:2px 4px;border-radius:2px">
+                <option value="ALL">ALL</option>
+                <option value="BTC">BTC</option>
+                <option value="ETH">ETH</option>
+                <option value="SOL">SOL</option>
+                <option value="XRP">XRP</option>
+                <option value="DOGE">DOGE</option>
+              </select>
+            </div>
             <div style="font-size:9px;color:var(--tx3);margin-bottom:6px;line-height:1.5">
               <span style="color:var(--orange)">●</span> Bot confidence &nbsp;
-              <span style="color:#00d4ff">●</span> Actual outcome &nbsp;
-              <span style="color:rgba(255,255,255,0.2)">●</span> Skip
+              <span style="color:#00d4ff">●</span> Win &nbsp;
+              <span style="color:#cc2222">●</span> Loss
             </div>
             <div style="position:relative;overflow:visible">
               <canvas id="predChart" style="width:100%;height:180px;display:block" height="180"></canvas>
@@ -1169,7 +1179,7 @@ MIIEowIBAAKCAQEA...
               <span style="color:var(--orange);font-family:var(--display);font-size:10px;letter-spacing:0.15em">ORDERBOOK</span><br>
               <span id="obText">--</span>
             </div>
-            <div class="signal-list" id="signalList" style="max-height:320px">
+            <div class="signal-list" id="signalList" style="max-height:none;overflow-y:visible">
               <div class="empty">ARM THE SYSTEM TO BEGIN</div>
             </div>
           </div>
@@ -1951,10 +1961,12 @@ function renderPositions() {
     + '</tr></thead><tbody>'
     + all.map(function(p) {
         var isOpen = p.status === 'open';
-        var pnlColor = (p.pnl != null && p.pnl >= 0) ? 'var(--orange2)' : 'var(--red2)';
-        // pnl = net profit after fees (NOT including stake recovery — stake is separate)
-        // e.g. stake $1.12, win payout $7.92 gross, net pnl = $7.92 - $1.12 = $6.80
-        var pnlText = p.pnl != null
+        // Only show P&L once position is fully settled — never on open/pending positions
+        var isSettled = p.fillStatus === 'settled' || p._settled;
+        var pnlColor = isSettled
+          ? (p.won === true ? 'var(--orange2)' : 'var(--red2)')
+          : 'var(--tx3)';
+        var pnlText = isSettled && p.pnl != null
           ? ((p.pnl >= 0 ? '+' : '') + '$' + Math.abs(p.pnl).toFixed(2))
           : '—';
 
@@ -1979,7 +1991,7 @@ function renderPositions() {
             + (fillStatus === 'pending' ? 'CANCEL' : 'CLOSE')
             + '</button>'
           : '<span style="color:var(--tx3);font-size:9px;font-family:var(--display)">'
-            + (p.won === true ? 'WIN' : p.won === false ? 'LOSS' : p.pnl != null && p.pnl > 0 ? 'WIN' : p.pnl != null ? 'LOSS' : '—') + '</span>';
+            + (isSettled ? (p.won === true ? 'WIN' : 'LOSS') : '—') + '</span>';
 
         return '<tr>'
           + '<td style="max-width:0">' + p.mkt + '</td>'
@@ -2179,14 +2191,25 @@ function fetchBalance() {
     if (S.cash >= 0) {
       S.portfolio = S.cash + positionValue;
       if (!S.startPortfolio) {
-        // Baseline is CASH ONLY — not including open positions
-        // Open position value fluctuates and causes false P&L readings
         S.startPortfolio = S.cash;
         log('Session start: cash=$' + S.cash.toFixed(2) + ' (baseline set, excluding $' + positionValue.toFixed(2) + ' open positions)', 'b');
       }
       if (!PROTECTED_PRINCIPAL) PROTECTED_PRINCIPAL = S.cash;
-      // P&L = current cash vs starting cash — positions settle into cash
+      // P&L = current cash vs starting cash — only real Kalshi balance
       S.pnl = S.cash - S.startPortfolio;
+      // Sync W/L from history rather than trusting local counters
+      var settled = S.history ? S.history.filter(function(p){ return p.fillStatus === 'settled' && p._botPlaced; }) : [];
+      if (settled.length > 0) {
+        S.wins   = settled.filter(function(p){ return p.won === true; }).length;
+        S.losses = settled.filter(function(p){ return p.won === false; }).length;
+        S.consLoss = (function() {
+          var streak = 0;
+          for (var i = settled.length - 1; i >= 0; i--) {
+            if (settled[i].won === false) streak++; else break;
+          }
+          return streak;
+        })();
+      }
       balanceReadings++;
       updateMetrics();
     }
@@ -2667,7 +2690,7 @@ function syncPortfolioPositions() {
           _manual: true  // user placed — bot won't interfere
         };
         S.positions.push(manualPos);
-        S.exposure += cost;
+        // S.exposure comes from fetchBalance — don't add locally
         added++;
         log('[MANUAL] Detected position: ' + side.toUpperCase() + ' ' + ticker + ' — bot will not interfere', 'a');
       }
@@ -3403,25 +3426,42 @@ var PREDICTION_HISTORY = []; // {ts, market, dir, confidence, edge, outcome, pnl
 var PRED_MAX = 50; // keep last 50 trades
 
 function recordPrediction(pos, confidence, edge) {
+  // Derive asset from ticker
+  var ticker = pos.ticker || '';
+  var asset = ticker.includes('ETH') ? 'ETH'
+            : ticker.includes('SOL') ? 'SOL'
+            : ticker.includes('DOGE') ? 'DOGE'
+            : ticker.includes('XRP') ? 'XRP'
+            : ticker.includes('BNB') ? 'BNB' : 'BTC';
+
   PREDICTION_HISTORY.push({
     ts:         Date.now(),
     market:     pos.mkt || pos.ticker,
+    ticker:     ticker,
+    asset:      asset,
     dir:        pos.dir,
+    posId:      pos.id,
     confidence: confidence || 50,
     edge:       edge || 0,
-    outcome:    null, // filled on settle
+    outcome:    null,
     pnl:        null
   });
   if (PREDICTION_HISTORY.length > PRED_MAX) PREDICTION_HISTORY.shift();
 }
 
 function resolvePrediction(posId, won, pnl) {
-  // Find the most recent unresolved prediction for this market
+  // Match by posId first, then by unresolved — prevents cross-position contamination
+  var resolved = false;
   for (var i = PREDICTION_HISTORY.length - 1; i >= 0; i--) {
-    if (PREDICTION_HISTORY[i].outcome === null) {
-      PREDICTION_HISTORY[i].outcome = won ? 'win' : 'loss';
-      PREDICTION_HISTORY[i].pnl = pnl;
-      break;
+    var p = PREDICTION_HISTORY[i];
+    if (p.outcome === null && (p.posId === posId || !resolved)) {
+      if (p.posId === posId || !resolved) {
+        p.outcome = won ? 'win' : 'loss';
+        p.pnl     = pnl;
+        p.posId   = posId;
+        resolved  = true;
+        if (p.posId === posId) break; // exact match found
+      }
     }
   }
   drawPredictionChart();
@@ -3442,9 +3482,14 @@ function drawPredictionChart() {
   ctx.clearRect(0, 0, W, H);
 
   // Show all trades — settled AND pending (pending shown as grey)
-  var settled = PREDICTION_HISTORY.filter(function(p) { return p.outcome !== null; });
-  var pending = PREDICTION_HISTORY.filter(function(p) { return p.outcome === null; });
-  var called  = PREDICTION_HISTORY.length;
+  // Apply coin filter
+  var coinFilter = (document.getElementById('predCoinFilter') || {}).value || 'ALL';
+  var filteredHistory = coinFilter === 'ALL' ? PREDICTION_HISTORY
+    : PREDICTION_HISTORY.filter(function(p) { return p.asset === coinFilter; });
+
+  var settled = filteredHistory.filter(function(p) { return p.outcome !== null; });
+  var pending = filteredHistory.filter(function(p) { return p.outcome === null; });
+  var called  = filteredHistory.length;
   var hits    = settled.filter(function(p) { return p.outcome === 'win'; }).length;
   var acc     = settled.length > 0 ? Math.round(hits / settled.length * 100) : null;
 
@@ -3474,26 +3519,35 @@ function drawPredictionChart() {
   var c = document.getElementById('predCalled');
   var h = document.getElementById('predHit');
   var a = document.getElementById('predAccuracy');
-  if (c) c.textContent = called || settled.length;
+  if (c) c.textContent = (called || settled.length) + (pending.length > 0 ? ' (+' + pending.length + ')' : '');
   if (h) h.textContent = hits;
   if (a) {
     a.textContent = acc !== null ? acc + '%' : '--%';
     a.style.color = acc === null ? 'var(--tx3)' : acc >= 60 ? 'var(--orange2)' : acc >= 50 ? 'var(--gold)' : 'var(--red2)';
   }
 
-  if (settled.length < 1) {
-    ctx.fillStyle = 'rgba(255,255,255,0.15)';
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(pending.length > 0 ? pending.length + ' trade(s) pending settlement...' : 'Collecting data — arm the system to begin', W/2, H/2);
-    return;
-  }
-
-  var trades = settled; // draw settled trades
-
+  // Draw even with no data — show axes and pending trades
   var pad = { t: 20, b: 30, l: 36, r: 10 };
   var chartW = W - pad.l - pad.r;
   var chartH = H - pad.t - pad.b;
+
+  if (settled.length < 1 && pending.length < 1) {
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('No trades yet — arm the system to begin', W/2, H/2 - 10);
+    ctx.font = '9px monospace';
+    ctx.fillStyle = 'rgba(255,85,0,0.4)';
+    ctx.fillText('Chart updates as trades settle', W/2, H/2 + 10);
+    return;
+  }
+
+  // Show pending as grey dots at their confidence level even before settlement
+  var allTrades = settled.concat(pending.map(function(p) {
+    return Object.assign({}, p, { outcome: 'pending' });
+  }));
+
+  var trades = allTrades;
 
   // Draw grid lines
   ctx.strokeStyle = 'rgba(255,255,255,0.06)';
@@ -3529,18 +3583,24 @@ function drawPredictionChart() {
   // Draw actual outcome dots
   trades.forEach(function(p, i) {
     var x  = pad.l + (i / Math.max(1, trades.length-1)) * chartW;
-    var cy = p.outcome === 'win' ? pad.t + chartH * 0.15 : pad.t + chartH * 0.85;
+    var cy = p.outcome === 'win' ? pad.t + chartH * 0.15
+           : p.outcome === 'loss' ? pad.t + chartH * 0.85
+           : pad.t + chartH * 0.5; // pending at middle
     var confY = pad.t + chartH - (p.confidence/100 * chartH);
 
     // Vertical line from prediction to outcome
-    ctx.strokeStyle = p.outcome === 'win' ? 'rgba(0,212,255,0.3)' : 'rgba(200,30,30,0.3)';
+    ctx.strokeStyle = p.outcome === 'win' ? 'rgba(0,212,255,0.3)'
+                    : p.outcome === 'loss' ? 'rgba(200,30,30,0.3)'
+                    : 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, confY); ctx.lineTo(x, cy); ctx.stroke();
 
     // Outcome dot
     ctx.beginPath();
     ctx.arc(x, cy, 4, 0, Math.PI*2);
-    ctx.fillStyle = p.outcome === 'win' ? '#00d4ff' : '#cc2222';
+    ctx.fillStyle = p.outcome === 'win' ? '#00d4ff'
+                  : p.outcome === 'loss' ? '#cc2222'
+                  : 'rgba(255,255,255,0.3)'; // pending = grey
     ctx.fill();
 
     // P&L label on hover (just show for last few)
@@ -4541,7 +4601,7 @@ function settlePosition(pos, won, payoutDollars) {
 
   // Don't modify S.cash locally — fetchBalance is the only truth source
   // Only update exposure tracking for UI display
-  S.exposure = Math.max(0, S.exposure - pos.stake);
+  // S.exposure updated by fetchBalance — don't adjust locally
   // Keep S.pnl as running estimate until fetchBalance corrects it
   // S.pnl updated by updateMetrics from real balance — don't accumulate locally
   if (won) { S.wins++; S.consLoss = 0; onTradeWin(pos.stake); }
@@ -4958,8 +5018,7 @@ function forceRunCycle() {
 
           return placeOrder(mkt.ticker, dir, count, price).then(function(order) {
             if (order && order.order) {
-            // S.cash updated by fetchBalance only
-            S.exposure += parseFloat(actual);
+            // S.cash and S.exposure updated by fetchBalance only
             var pos = {
               id: order.order.order_id || Date.now(),
               mkt: mktTitle.substring(0, 24),
@@ -5877,7 +5936,7 @@ function switchPanel(tab) {
   }
   if (tab === 'signals') syncSignalListFull();
   if (tab === 'analytics') { updateAnalytics(); setTimeout(updateIndicatorCharts, 150); }
-  if (tab === 'dashboard') { setTimeout(drawPredictionChart, 100); }
+  if (tab === 'dashboard') { setTimeout(drawPredictionChart, 100); setTimeout(drawPredictionChart, 600); }
   if (tab === 'signals') { setTimeout(drawSignalChart, 100); }
 }
 
@@ -6567,6 +6626,69 @@ function initKittanVideos() {
 }
 setTimeout(initKittanVideos, 1000);
 
+// ── Module state manager — shows armed/disarmed state across all panels ──
+function updateModuleStates() {
+  var armed = S.armed;
+  var connected = S.connected;
+
+  // Signal engine panel
+  var kellyBox = document.querySelector('.kelly-box');
+  var sigEmpty = document.querySelector('#signalList .empty');
+
+  // Prediction chart placeholder text
+  var notArmedMsg = 'Connect credentials and arm the system to begin';
+  var waitingMsg  = 'No trades yet — first trade will appear here';
+
+  // Kelly display — show waiting state when not armed
+  if (!armed) {
+    var kellyLines = document.querySelectorAll('.kelly-line');
+    kellyLines.forEach(function(el) { el.style.opacity = '0.3'; });
+    var armMsg = document.getElementById('armMsg');
+    if (!armMsg) {
+      var box = document.querySelector('.kelly-box');
+      if (box) {
+        armMsg = document.createElement('div');
+        armMsg.id = 'armMsg';
+        armMsg.style.cssText = 'text-align:center;padding:12px;font-family:var(--display);font-size:10px;letter-spacing:0.2em;color:var(--tx3)';
+        armMsg.textContent = connected ? 'ARM THE SYSTEM TO BEGIN' : 'CONNECT CREDENTIALS TO BEGIN';
+        box.appendChild(armMsg);
+      }
+    } else {
+      armMsg.textContent = connected ? 'ARM THE SYSTEM TO BEGIN' : 'CONNECT CREDENTIALS TO BEGIN';
+      armMsg.style.display = 'block';
+    }
+  } else {
+    // Armed — hide the message, restore opacity
+    var armMsg2 = document.getElementById('armMsg');
+    if (armMsg2) armMsg2.style.display = 'none';
+    document.querySelectorAll('.kelly-line').forEach(function(el) { el.style.opacity = '1'; });
+  }
+
+  // Indicator labels — show "waiting for data" when not armed
+  var waitLabels = ['fgLabel','rsiLabel','macdLabel','mfiLabel'];
+  waitLabels.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (!connected) {
+      el.textContent = 'connect to load';
+      el.style.color = 'var(--tx3)';
+    } else if (!armed && el.textContent === 'loading...') {
+      el.textContent = 'arm system to load';
+      el.style.color = 'var(--tx3)';
+    }
+  });
+
+  // Gauges — show -- when not armed
+  if (!armed) {
+    ['gExpVal','gDdVal','gKuVal'].forEach(function(id) {
+      var el = document.getElementById(id);
+      if (el && el.textContent === '0.0%' || el && el.textContent === '0%') {
+        el.style.color = 'var(--tx3)';
+      }
+    });
+  }
+}
+
 function startLiveCharts() {
   if (CHART_ANIM_INTERVAL) clearInterval(CHART_ANIM_INTERVAL);
   var _chartFrame = 0;
@@ -6574,6 +6696,8 @@ function startLiveCharts() {
     _chartFrame++;
     // P&L chart: always update (visible on dashboard)
     updatePnlChart();
+    // Module states
+    updateModuleStates();
     // Signal chart: every frame (1s) if visible
     var signalsActive = document.getElementById('psec-signals');
     if (signalsActive && signalsActive.style.display !== 'none') {
