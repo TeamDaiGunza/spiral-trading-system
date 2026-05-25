@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect width="256" height="256" fill="#060608"/>
+  <!-- Outer ring -->
+  <circle cx="128" cy="128" r="120" fill="none" stroke="#FF5500" stroke-width="4" opacity="0.6"/>
+  <circle cx="128" cy="128" r="108" fill="none" stroke="#FF5500" stroke-width="1" opacity="0.3"/>
+  <!-- Spiral arms -->
+  <g transform="translate(128,128)">
+    <path d="M0,-80 Q40,-40 80,0 Q40,40 0,80 Q-40,40 -80,0 Q-40,-40 0,-80Z" fill="none" stroke="#FF5500" stroke-width="2" opacity="0.4"/>
+    <!-- Drill tip pointing up -->
+    <polygon points="0,-90 -18,-30 18,-30" fill="#FF5500" opacity="0.9"/>
+    <polygon points="0,-90 -18,-30 0,-50" fill="#FF8800" opacity="0.7"/>
+    <!-- Drill body -->
+    <rect x="-18" y="-30" width="36" height="60" fill="#FF5500" opacity="0.8" rx="2"/>
+    <rect x="-18" y="-30" width="18" height="60" fill="#FF8800" opacity="0.5" rx="2"/>
+    <!-- Drill ridges -->
+    <line x1="-18" y1="-15" x2="18" y2="-15" stroke="#FF8800" stroke-width="2" opacity="0.6"/>
+    <line x1="-18" y1="0" x2="18" y2="0" stroke="#FF8800" stroke-width="2" opacity="0.6"/>
+    <line x1="-18" y1="15" x2="18" y2="15" stroke="#FF8800" stroke-width="2" opacity="0.6"/>
+    <!-- Handle/base -->
+    <ellipse cx="0" cy="30" rx="22" ry="8" fill="#FF5500" opacity="0.9"/>
+    <!-- Glow circle -->
+    <circle cx="0" cy="-60" r="6" fill="#FFD700" opacity="0.8"/>
+    <circle cx="0" cy="-60" r="10" fill="none" stroke="#FFD700" stroke-width="1" opacity="0.4"/>
+  </g>
+  <!-- Corner brackets -->
+  <path d="M8,8 L8,32 M8,8 L32,8" stroke="#FF5500" stroke-width="3" fill="none" opacity="0.7"/>
+  <path d="M248,8 L248,32 M248,8 L224,8" stroke="#FF5500" stroke-width="3" fill="none" opacity="0.7"/>
+  <path d="M8,248 L8,224 M8,248 L32,248" stroke="#FF5500" stroke-width="3" fill="none" opacity="0.7"/>
+  <path d="M248,248 L248,224 M248,248 L224,248" stroke="#FF5500" stroke-width="3" fill="none" opacity="0.7"/>
+  <!-- Text -->
+  <text x="128" y="210" text-anchor="middle" fill="#FF5500" font-family="monospace" font-size="14" letter-spacing="4" opacity="0.8">GURREN</text>
+  <text x="128" y="228" text-anchor="middle" fill="#8855FF" font-family="monospace" font-size="11" letter-spacing="3" opacity="0.7">KALSHI</text>
+</svg>

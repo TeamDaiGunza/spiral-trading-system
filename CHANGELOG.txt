@@ -1,0 +1,459 @@
+================================================================================
+  THE SPIRAL TRADING SYSTEM — CHANGELOG
+  "Don't believe in yourself. Believe in me, who believes in you." — Kamina
+================================================================================
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 — Functionality Audit + Small Account Focus
+--------------------------------------------------------------------------------
+
+AUDIT
+  Full system audit — all 56 functions verified present and wired correctly.
+  Core trading loop, signal engine, intelligence systems, risk management,
+  settlement logic, and UI all confirmed intact.
+
+SMALL ACCOUNT GROWTH
+  - Hard 25% cap: single trade can never exceed 25% of cash regardless of
+    what Kelly calculates. Keeps small accounts safe from oversizing.
+  - Compounding bonus: when compound mode is ON and session is profitable,
+    10% of profits added to sizing. Rewards winning streaks and scales
+    naturally as the account grows.
+  - EV math in Claude prompt: Claude now explicitly calculates expected value
+    before deciding. "If YES resolves 60% at 45c cost, EV = +$0.15 per dollar.
+    Only trade positive EV." Correct mental model baked into every decision.
+  - Account size context: Claude knows exact cash balance and is reminded
+    every call that every dollar matters.
+
+TRADING PARTNER PERSONA
+  - Reframed as elite AI trading partner whose primary mission is growing
+    small accounts through disciplined, high-conviction trades.
+  - Positioned as more knowledgeable than the user — gives direct advice,
+    not hedged suggestions. User is in control but relies on bot's judgment.
+  - Teaching mode: explains what signals meant, what user could have done
+    differently, gives specific price targets when asked.
+  - Tone: like an older brother who is very good at trading — confident,
+    direct, educational, never condescending.
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 (Evening) — Indicator Charts + Trading Partner UI
+--------------------------------------------------------------------------------
+
+TECHNICAL INDICATOR CHARTS (Analytics tab)
+  - RSI(14): live chart with overbought (70) and oversold (30) reference lines.
+    Plain-English label: "OVERBOUGHT — market may pull back" etc.
+  - MACD histogram: green bars = bullish momentum, red = bearish. Shows
+    crossover history over last 50 data points.
+  - MFI(14): Money Flow Index using price AND volume. More reliable than RSI
+    alone. Reference lines at 80 (heavy buying) and 20 (heavy selling).
+  - Price history: sparkline chart with BTC/ETH/SOL/DOGE selector.
+  - All charts update when switching to Analytics tab and on every price fetch.
+  - RSI, MACD, MFI values now passed to Claude on every trade call so it can
+    factor technical context into its decision.
+
+TRADING PARTNER (Analytics tab)
+  - Free-text chat with the bot — ask anything about current market conditions,
+    open positions, strategy, or what it's seeing.
+  - Preset buttons: WHY DID YOU TRADE THAT / SHOULD I CLOSE ANYTHING /
+    WHAT DO YOU SEE / TEACH ME
+  - Every response includes full market context: live prices, indicators,
+    Fear & Greed, session P&L, open positions, recent trade history.
+  - Uses separate callClaudeChat() for free-text (600 token responses),
+    completely separate from the JSON signal generation calls.
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 (Afternoon) — Accuracy Degradation Fix
+--------------------------------------------------------------------------------
+
+ROOT CAUSE
+  The bot was getting worse over long sessions because suppression logic was
+  permanent — a bad morning could block valid afternoon trades indefinitely.
+
+FIXES
+  - Pattern expiry: patterns that haven't seen activity in 2 hours automatically
+    expire. Prevents stale suppression from blocking changed market conditions.
+  - Direction stat decay: after 90 minutes of no trades in a direction,
+    win/loss counts are halved. Suppression gradually lifts rather than
+    staying permanent forever.
+  - Correlation cache TTL: cross-market signals now expire after 3 minutes
+    instead of 5. Keeps cross-market context current.
+  - Fear & Greed: refreshes every 3 minutes (was 5). Catches faster
+    sentiment shifts.
+  - Live prices: refreshes every 30 seconds (was 60). Velocity calculations
+    more accurate with more frequent data.
+  - 4-hour auto-reset: every 4 hours the session baseline, pattern cache,
+    direction stats, and correlation cache all clear automatically. Prevents
+    stale data from compounding over long sessions. Trade history is kept.
+    You will see "Auto-resetting session baseline" in the combat log.
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 (Afternoon) — Order Direction Bug Fix
+--------------------------------------------------------------------------------
+
+BUG
+  When placing NO orders, the bot was sending the wrong price to Kalshi.
+  Kalshi's API always expects yes_price to be the YES side price regardless
+  of which side you are buying. Buying NO at 35c requires yes_price = 65,
+  not yes_price = 35. This was causing some orders to fill on the wrong side.
+
+FIX
+  placeOrder() now always converts to YES price before sending to Kalshi.
+  Buying NO at 35c sends yes_price = 65 correctly.
+
+CLARITY IMPROVEMENTS
+  - Combat log now shows "Firing NO (betting DOWN)" vs "Firing YES (betting UP)"
+  - Position badges show tooltip "Betting price goes UP" or "Betting price
+    goes DOWN" on hover
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 (Afternoon) — Tooltip System Rebuild
+--------------------------------------------------------------------------------
+
+PROBLEM
+  Tooltips were appearing twice (CSS pseudo-element AND JavaScript element
+  both rendering) and in wrong positions near screen edges.
+
+FIX
+  - CSS pseudo-elements completely disabled with display:none !important
+  - Single static panel fixed at top-left corner (14px from top, 14px from left)
+  - Never moves, never obscures trading controls
+  - Orange border with subtle glow effect
+  - 120ms fade delay prevents flickering when moving between nearby elements
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 (Morning) — Defensive Guards + Settlement Fix
+--------------------------------------------------------------------------------
+
+SETTLEMENT BUG
+  Bot was reporting wins on positions still open. Kalshi sets the result field
+  before paying out — the bot was settling on result alone without waiting for
+  the market to be finalized.
+
+  Fix: pollMarketResult() now requires BOTH conditions before settling:
+    - result === 'yes' or 'no'   AND
+    - status === 'finalized' or 'settled' or 'resolved'
+  
+  If result is set but not finalized, bot keeps polling every 15 seconds.
+  Falls back to expiration_value field if result field is empty.
+
+DEFENSIVE GUARDS ADDED
+  - settlePosition: double-settle guard via pos._settled flag. Prevents phantom
+    P&L from race conditions between momentum watcher and market poller.
+  - renderPositions: null guard if DOM element missing during startup.
+  - fetchFills: null ticker guard returns empty array instead of bad API call.
+  - analyzeMarketTiming: NaN guard on malformed Kalshi date strings.
+  - P&L display: NaN guard shows $0.00 instead of crashing the UI.
+  - Momentum watcher: checks pos._settled before attempting exit.
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 (Morning) — 6 New Intelligence Signals
+--------------------------------------------------------------------------------
+
+FILL HISTORY ANALYSIS
+  Fetches last 50 actual fills per market from Kalshi's /trades endpoint.
+  Analyzes YES vs NO volume imbalance, price trend within fills (are prices
+  moving up or down in the order flow), and volume spikes (2x+ normal volume
+  usually means informed buying). This is real transaction data — much more
+  reliable than orderbook snapshots which can be spoofed.
+
+MARKET TIMING
+  - Expired markets: automatically skipped before any analysis
+  - Near-expiry (less than 3 minutes left): skipped — pure coin flip
+  - Fresh markets (less than 5 minutes old): 30% score boost and edge bonus
+  - Stale markets: small penalty applied
+
+STRIKE DISTANCE
+  For "BTC above $X" markets, calculates exactly how far current price is from
+  the strike. Price clearly above strike but YES priced at 40c = obvious
+  mispricing worth trading. Price right at the strike = coin flip, skip it.
+
+CROSS-MARKET CORRELATION
+  Tracks signals across BTC/ETH/SOL/DOGE 15m markets simultaneously.
+  If 2+ correlated markets all signal YES at the same time, logs confirmation.
+  If markets diverge, flags the disagreement. Crypto moves together — agreement
+  across assets is a much stronger signal than any single market alone.
+
+VOLUME SPIKE DETECTION
+  Compares current 24h volume to prior day. 2x+ spike = informed money flowing
+  in. Applied as a strength multiplier to fill analysis signal.
+
+5-MINUTE PRICE VELOCITY
+  Added standalone signal and hard block:
+  - If BTC falls more than 0.3% in 5 minutes, YES bets on BTC are blocked
+  - If BTC rises more than 0.3% in 5 minutes, NO bets on BTC are blocked
+  - Also used as a positive signal when velocity aligns with trade direction
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 (Morning) — Pattern Memory + Win/Loss Panel
+--------------------------------------------------------------------------------
+
+PATTERN TRACKER
+  Tracks win rate per market+direction combination (e.g. KXBTC15M:yes).
+  After 4 trades on a pattern:
+    - Below 30% win rate: block that combination entirely
+    - Below 40% win rate: require 50% more edge before firing
+    - Above 65% win rate: slight sizing bonus
+  Patterns expire after 2 hours of inactivity to prevent stale suppression.
+
+WIN/LOSS RESULT PANEL
+  Replaced bottom-right popup with top-left side panel at 110px from top.
+  Does not overlap trading controls.
+  - Slides in from left with smooth animation
+  - WIN: orange glow + Kamina victory clip
+  - LOSS: red glow + anime death clip
+  - Auto-dismisses after 8 seconds
+  - Each new result replaces the previous one immediately
+
+
+--------------------------------------------------------------------------------
+  May 24, 2026 (Early Morning) — Parallel Scanning + Signal Quality
+--------------------------------------------------------------------------------
+
+SIGNAL ENGINE REBUILD
+  calcQuantEdge() completely rebuilt with strict 2-signal consensus requirement.
+  
+  10 signals now evaluated per market:
+    1. Orderbook imbalance (needs 2x+ for vote, 3x+ for standalone signal)
+    2. Trade flow (last 10 trades, needs 75%+ one-sided)
+    3. Momentum vs market price (24h change disagrees with current odds)
+    4. Fear & Greed contrarian (only at extremes: 15 or below, 85 or above)
+    5. Price velocity (5-minute rate of change, 0.2% threshold)
+    6. Spread quality (tight spread = high liquidity = reliable signal)
+    7. Market price extremes (below 6c or above 94c = likely mispriced)
+    8. Fill history (volume imbalance, price trend, volume spikes)
+    9. Market timing (skip expired/near-expiry, boost fresh markets)
+   10. Strike distance (detects mispricings vs current asset price)
+
+CONSENSUS REQUIREMENT
+  Minimum 2 signals must agree OR 1 very strong orderbook signal (3x+ imbalance)
+  OR extreme price standalone signal. Single weak signals are ignored.
+
+PRE-TRADE FILTERS (applied after consensus, before Claude)
+  - Trend alignment: no YES on assets down 3%+ today, no NO on assets up 3%+
+  - Velocity block: no YES if falling 0.3%+ in 5 min, no NO if rising
+  - Direction suppression: below 35% win rate after 5 trades blocks direction
+  - Pattern suppression: below 30% win rate after 4 trades blocks market+direction
+
+DUAL CONFIRMATION
+  Two independent Claude calls must agree before any order fires. If they
+  disagree, the trade is skipped. Adds latency but significantly reduces
+  false positives.
+
+MARKET SCANNING
+  - Parallel scan: all 12 markets scored simultaneously, best picked
+  - Markets scored by: consensus strength + fill quality + timing bonus
+  - Opportunity scanner: runs every 90 seconds, half normal edge threshold
+  - Event-driven: extra scan when asset moves 0.5%+ between checks
+
+
+--------------------------------------------------------------------------------
+  May 23, 2026 — Platform Integrations + UI Rebuild
+--------------------------------------------------------------------------------
+
+ROBINHOOD INTEGRATION
+  Ed25519 signing handled by backend proxy. Mirror trading: Kalshi YES on
+  15m crypto market automatically buys same crypto on Robinhood. Setup tab
+  in onboarding + Settings section. Credentials auto-load on launch.
+
+WEBULL INTEGRATION
+  HMAC-SHA1 signing via backend proxy. Same mirror logic as Robinhood.
+  Setup tab in onboarding + Settings section.
+
+PLATFORM SELECTOR
+  Topbar buttons: NONE / RH / WB / BOTH
+  Unified mirrorTrade() function routes to correct platform.
+  Selecting BOTH fires on both platforms simultaneously.
+
+UI OVERHAUL
+  - 5-tab layout: Dashboard / Signals / Positions / Analytics / Settings
+  - Two-row compact topbar (all controls fit without squishing at 1280px)
+  - Row 1: Brand + CREDS / RESET / PAPER / PAUSE / ARM SYSTEM
+  - Row 2: MIRROR selector + PIERCE THE HEAVENS force trade
+  - Live crypto price ticker (BTC / ETH / SOL / XRP / DOGE with 24h change)
+  - Session P&L curve chart
+  - Performance summary: Best Hour, Best Market, Kelly Calibration
+  - Tooltips on all controls (static top-left panel)
+
+POSITION MANAGEMENT
+  - Status flow: PENDING -> FILLED -> SETTLED
+  - CANCEL button for resting orders, CLOSE button for filled positions
+  - cancelPosition() handles all Kalshi cancel scenarios gracefully
+  - Position badges show YES/NO with tooltip explaining direction meaning
+
+
+--------------------------------------------------------------------------------
+  May 23, 2026 — Visual Overhaul + Media
+--------------------------------------------------------------------------------
+
+LOADING SCREEN
+  - Tengen Toppa battle clip plays fullscreen on launch (loading.mp4)
+  - Kamina's theme fades in over 2 seconds to 82% volume (loading-music.mp3)
+  - Progress bar fills with cycling status messages:
+      INITIALIZING SPIRAL DRIVE -> CONNECTING TO KALSHI ->
+      LOADING SIGNAL ENGINE -> CALIBRATING SPIRAL POWER
+  - Music fades out on connect (or after 30 seconds automatically)
+  - 15-second hard failsafe: loading screen always dismisses
+
+WIN/LOSS MEDIA
+  - WIN: Kamina victory clip plays in top-left panel
+  - LOSS: Anime death clip plays in top-left panel
+  - Panel slides in from left, glows orange (win) or red (loss)
+
+BACKGROUND IMAGERY
+  - App background: Anti-Spiral cosmic figure (darkened to 25%)
+  - Header banner: Tengen Toppa space battle scene
+  - Card panels: Kamina/Simon stargazing scene (very low opacity)
+  - Section headers: spinning spiral drill accent icons
+
+APP ICON
+  - Kamina circular portrait with orange glow ring
+  - Proper multi-size ICO: 16 / 32 / 48 / 64 / 128 / 256px for Windows
+
+
+--------------------------------------------------------------------------------
+  May 23, 2026 — Settlement + P&L Math
+--------------------------------------------------------------------------------
+
+SETTLEMENT SYSTEM
+  Real Kalshi market polling checks result and status fields every 30 seconds.
+  Requires both result AND status = finalized before settling (see May 24 fix).
+  Falls back to expiration_value field if result field empty.
+  Post-settlement balance reconciliation: fetches real Kalshi balance 3s later.
+
+P&L MATH
+  Correct Kalshi payout formula: contracts x $1.00 x (1 - 0.01 fee) - stake
+  Stores entryPriceCents on each position for accurate cost basis tracking.
+  Sanity cap: P&L cannot exceed contracts x $0.99.
+  Session P&L always derived from real_balance - startPortfolio, never
+  accumulated locally (prevents drift over long sessions).
+
+BALANCE TRACKING
+  fetchBalance() parses balance, balance_dollars, and portfolio_value fields.
+  True portfolio = cash balance + open position market value.
+  startPortfolio always resets on ARM, never carries from previous sessions.
+
+
+--------------------------------------------------------------------------------
+  May 23, 2026 — AI Exit Manager
+--------------------------------------------------------------------------------
+
+MOMENTUM WATCHER
+  Every 60 seconds, Claude reviews each open position and decides exit or hold.
+  Context provided: current price vs entry, rolling price trend, live spot price,
+  orderbook state, time remaining on market, current session P&L.
+  Returns: exit/hold with confidence score and suggested exit price.
+  Guards: will not exit if position value below 4c, will not exit already-settled.
+
+CLOSE POSITION
+  Sells at current market bid via Kalshi order.
+  CLOSE button in positions table for manual exit at any time.
+
+
+--------------------------------------------------------------------------------
+  May 23, 2026 — Risk Management
+--------------------------------------------------------------------------------
+
+CIRCUIT BREAKERS
+  - Stop-loss: halts trading if drawdown reaches configured percentage.
+    Requires 3+ completed trades AND 5+ balance readings before can trigger.
+    Prevents false-positive firing on startup.
+  - Consecutive loss circuit breaker: configurable (default 5 losses).
+  - Profit lock: halves position sizing once up 5%+ on the session.
+  - Recovery mode: reduced sizing during any drawdown period.
+  - Max positions cap: never holds more than configured number simultaneously.
+
+KELLY SIZING SYSTEM
+  - Quarter Kelly for first 10 trades (conservative ramp)
+  - 37.5% Kelly for trades 10-20 (step up)
+  - Full requested Kelly after 20 trades
+  - Dynamic Kelly: adjusts multiplier based on rolling win rate
+  - Profit lock: halves Kelly when profit lock active
+  - Recovery mode: halves Kelly during drawdown
+  - Hard cap: never more than 25% of cash on single trade
+  - Compounding bonus: up to 15% extra sizing from session profits when
+    compound mode is enabled
+
+MINIMUM VIABLE STAKES
+  $0-2 stake: requires 4%+ edge (higher bar for tiny trades)
+  $2-5 stake: requires 2.5%+ edge
+  $5-10 stake: requires 1.5%+ edge
+  $10+ stake: uses configured edge minimum setting
+
+
+--------------------------------------------------------------------------------
+  May 23, 2026 — Order System
+--------------------------------------------------------------------------------
+
+SELF-DISCOVERING ENDPOINT
+  On each ARM, probes Kalshi API to detect which endpoint is active.
+  Falls back automatically between legacy and events endpoints.
+  Handles endpoint changes mid-session without manual intervention.
+
+ORDER IMPROVEMENTS
+  Aggressive limit pricing: +2c over ask for better fill rates.
+  pollPosition -> pollMarketResult flow skips broken order status lookup.
+  Paper trading: marks filled immediately, polls real market for result.
+
+KALSHI API NOTES
+  Legacy endpoint: POST /trade-api/v2/portfolio/orders
+  Required fields: action (buy), side (yes/no), yes_price, count, type (limit)
+  CRITICAL: yes_price is ALWAYS the YES side price regardless of which side
+  you are buying. Buying NO at 35c requires yes_price = 65, not 35.
+  Events endpoint additionally requires: time_in_force, self_trade_prevention_type
+
+
+--------------------------------------------------------------------------------
+  May 22, 2026 — Electron Packaging
+--------------------------------------------------------------------------------
+
+ARCHITECTURE
+  Electron app with embedded Node.js HTTP server on port 3456.
+  No browser needed. Credentials stored in %APPDATA%\Spiral\ per Windows user.
+  Survives reinstalls and updates. Portable and installer both use same path.
+
+STARTUP
+  Window opens in parallel with server start.
+  Frontend retries connecting up to 20 times with backoff (handles slow machines).
+  15-second hard failsafe dismisses loading screen no matter what.
+
+STABILITY
+  Crash guards: renderer crash triggers reload instead of close.
+  Uncaught exceptions caught at process level.
+  Closes fully on X button — no hide-to-tray ghost process.
+
+ASSET SERVING
+  asar: false so all asset files are accessible as regular files after install.
+  ASSET_ROOT searches multiple paths to find files in any install context.
+  Static file server handles: PNG, JPG, MP4, MP3, ICO with range request
+  support for video streaming.
+  MP3 regex fix: audio files correctly included in static file pattern.
+
+BUILD
+  node_modules\.bin\electron-builder --win --x64
+  Output: dist\The Spiral Setup 1.0.0.exe (installer)
+          dist\The-Spiral-Portable.exe (no install required)
+
+
+--------------------------------------------------------------------------------
+  May 22, 2026 — Initial Release (v0.1)
+--------------------------------------------------------------------------------
+
+  - Claude AI signal generation (claude-sonnet-4-5)
+  - Kalshi RSA-PSS authentication and order placement
+  - BTC/15m and BTC hourly market support
+  - Half Kelly position sizing
+  - Basic win/loss tracking and combat log
+  - Node.js backend + browser-based UI
+  - Tutorial setup screen with API key instructions
+
+
+================================================================================
+  END OF CHANGELOG
+================================================================================

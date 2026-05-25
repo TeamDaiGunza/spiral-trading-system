@@ -1,0 +1,72 @@
+{
+  "name": "spiral-trading-system",
+  "version": "1.0.0",
+  "description": "The Spiral Trading System \u2014 Autonomous AI prediction market trader",
+  "main": "main.js",
+  "author": "Team Dai-Gurren Trading Division",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win --x64"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.spiral.trading",
+    "productName": "The Spiral",
+    "copyright": "Team Dai-Gurren Trading Division",
+    "asar": false,
+    "files": [
+      "main.js",
+      "index.html",
+      "mobile.html",
+      "icon.png",
+      "banner.png",
+      "loading.png",
+      "panel.png",
+      "spiral.png",
+      "antispiril.png",
+      "icon.ico",
+      "loading.mp4",
+      "victory.mp4",
+      "loading-music.mp3",
+      "defeat.mp4",
+      "kittan.mp4",
+      "pierce.mp3",
+      "preload.js"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "The Spiral Trading System",
+      "uninstallDisplayName": "The Spiral Trading System"
+    },
+    "portable": {
+      "artifactName": "The-Spiral-Portable.exe"
+    },
+    "icon": "icon.png"
+  }
+}
