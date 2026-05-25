@@ -1713,19 +1713,19 @@ function addSignal(dir, mkt, stake, reason, confidence, ticker) {
     : null;
 
   var linkHtml = kalshiUrl
-    ? '<a href="' + kalshiUrl + '" target="_blank" style="font-size:8px;color:var(--orange);font-family:var(--mono);letter-spacing:0.1em;text-decoration:none;border:1px solid rgba(255,85,0,0.3);padding:1px 5px;border-radius:2px;flex-shrink:0;margin-left:4px" title="View on Kalshi">VIEW ↗</a>'
+    ? '<a href="' + kalshiUrl + '" target="_blank" style="font-size:7px;color:var(--orange);font-family:var(--mono);text-decoration:none;border:1px solid rgba(255,85,0,0.3);padding:1px 4px;border-radius:2px;flex-shrink:0" title="View on Kalshi">↗</a>'
     : '';
   var safeTicker = ticker ? ticker : '';
   var recheckHtml = ticker
-    ? '<button onclick="recheckMarket(this.dataset.t,this.dataset.m)" data-t="' + safeTicker + '" data-m="' + mkt.replace(/"/g,"") + '" style="font-size:8px;color:var(--cyan);font-family:var(--mono);letter-spacing:0.1em;background:transparent;border:1px solid rgba(0,212,255,0.3);padding:1px 5px;border-radius:2px;cursor:pointer;flex-shrink:0;margin-left:4px" title="Force re-scan this market now">SCAN ⟳</button>'
+    ? '<button onclick="recheckMarket(this.dataset.t,this.dataset.m)" data-t="' + safeTicker + '" data-m="' + mkt.replace(/"/g,"") + '" style="font-size:7px;color:var(--cyan);font-family:var(--mono);background:transparent;border:1px solid rgba(0,212,255,0.3);padding:1px 4px;border-radius:2px;cursor:pointer;flex-shrink:0" title="Force re-scan this market now">⟳</button>'
     : '';
 
   var e = document.createElement('div');
   e.className = 'signal ' + dir;
-  e.style.cssText = 'display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap';
-  e.innerHTML = '<span class="sig-dir ' + dir + '">' + dir.toUpperCase() + '</span>'
-    + '<span class="sig-body" style="flex:1;min-width:0"><strong>' + mkt + '</strong><br>' + reason + ' — ' + confidence + '% conf.</span>'
-    + '<span class="sig-stake" style="flex-shrink:0">' + (dir === 'skip' ? 'SKIP' : '$' + stake.toFixed(2)) + '</span>'
+  e.style.cssText = 'display:flex;align-items:flex-start;gap:4px;flex-wrap:nowrap;overflow:hidden';
+  e.innerHTML = '<span class="sig-dir ' + dir + '" style="flex-shrink:0">' + dir.toUpperCase() + '</span>'
+    + '<span class="sig-body" style="flex:1;min-width:0;overflow:hidden"><strong style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + mkt + '</strong><span style="font-size:9px;color:var(--tx3);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + reason + ' — ' + confidence + '%</span></span>'
+    + '<span class="sig-stake" style="flex-shrink:0;font-size:9px">' + (dir === 'skip' ? 'SKIP' : '$' + stake.toFixed(2)) + '</span>'
     + linkHtml + recheckHtml;
   sl.insertBefore(e, sl.firstChild);
   while (sl.children.length > 12) sl.removeChild(sl.lastChild);
