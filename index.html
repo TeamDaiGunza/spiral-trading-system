@@ -319,7 +319,7 @@ button:active{transform:scale(0.97)}
   color:var(--orange);text-transform:uppercase;letter-spacing:0.15em;
   border-bottom:1px solid var(--bd2);font-family:var(--display);
 }
-.pos-table td{padding:6px 6px;border-bottom:1px solid rgba(255,85,0,0.07);color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pos-table td{padding:6px 6px;border-bottom:1px solid rgba(255,85,0,0.07);color:var(--tx2);overflow:hidden;word-break:break-word;white-space:normal}
 .pos-table td.mn{font-family:var(--display);color:var(--tx)}
 .pos-table tr:hover td{background:rgba(255,85,0,0.03)}
 .badge{display:inline-block;padding:2px 7px;font-size:9px;font-weight:700;font-family:var(--display);letter-spacing:0.05em}
@@ -570,9 +570,9 @@ button:focus-visible { outline: 1px solid var(--orange); outline-offset: 2px; }
   overflow-y: auto;
   font-size: 11px !important;
 }
-.log-stream .le { font-size: 11px !important; white-space: nowrap; }
-.log-stream .lt { font-size: 10px !important; }
-.log-stream .lm { font-size: 11px !important; }
+.log-stream .le { font-size: 11px !important; white-space: normal; flex-wrap: wrap; }
+.log-stream .lt { font-size: 10px !important; flex-shrink: 0; }
+.log-stream .lm { font-size: 11px !important; word-break: break-word; min-width: 0; }
 
 /* ── KITTAN CHART ICON ── */
 .kittan-icon {
@@ -1347,7 +1347,7 @@ MIIEowIBAAKCAQEA...
 
       <!-- SETTINGS tab — clean grouped layout -->
       <div class="panel-section" id="psec-settings">
-        <div style="padding:12px">
+        <div style="padding:12px;overflow-y:auto;height:100%;box-sizing:border-box">
 
           <!-- RISK GROUP -->
           <div style="margin-bottom:16px">
@@ -1593,17 +1593,107 @@ function log(msg, cls) {
   if (el.children.length > 120) el.removeChild(el.lastChild);
 }
 
-function addSignal(dir, mkt, stake, reason, confidence) {
+// Force a full signal re-evaluation on a specific market outside the normal cycle
+function recheckMarket(ticker, mktLabel) {
+  if (!S.connected) { log('Connect first', 'r'); return; }
+  if (!ticker) { log('No ticker for recheck', 'r'); return; }
+  log('RECHECK: force-scanning ' + mktLabel + '...', 'o');
+
+  Promise.all([fetchLivePrices(), fetchFearGreed()])
+    .then(function(res) {
+      var prices = res[0];
+      // Find the market in our loaded list
+      var mkt = (LOADED_MARKETS || []).find(function(m) { return m.ticker === ticker; });
+      if (!mkt) {
+        log('RECHECK: market not in loaded list — fetching...', 'b');
+        return apiFetch(PROXY + '/kalshi/trade-api/v2/markets/' + ticker)
+          .then(function(d) { return d.market || d; })
+          .then(function(m2) { return runSingleMarketCheck(m2, prices); });
+      }
+      return runSingleMarketCheck(mkt, prices);
+    })
+    .catch(function(e) { log('RECHECK error: ' + e.message, 'r'); });
+}
+
+function runSingleMarketCheck(mkt, prices) {
+  if (!mkt || !mkt.ticker) { log('RECHECK: invalid market data', 'r'); return; }
+  var mktTitle = ('[' + (mkt._label || mkt._series || mkt.ticker) + '] ' + (mkt.subtitle || mkt.title || mkt.ticker)).substring(0, 44);
+  log('RECHECK [' + mkt.ticker + ']: fetching signals...', 'b');
+
+  return Promise.all([
+    fetchOrderbook(mkt.ticker),
+    fetchFills(mkt.ticker),
+    fetchRecentTrades(mkt.ticker),
+  ]).then(function(res) {
+    var ob = res[0], fills = res[1], trades = res[2];
+    var timing = analyzeMarketTiming(mkt);
+    var assetCode = mkt.ticker.includes('ETH') ? 'ETH'
+                  : mkt.ticker.includes('SOL') ? 'SOL'
+                  : mkt.ticker.includes('DOGE') ? 'DOGE'
+                  : mkt.ticker.includes('XRP') ? 'XRP' : 'BTC';
+    var liveData = prices ? prices[assetCode] : null;
+    var strikeInfo = calcStrikeDistance(mkt, prices);
+
+    var qEdge = calcQuantEdge(mkt, prices, ob, trades, fills, timing, strikeInfo);
+
+    log('RECHECK [' + mkt.ticker + ']: ' + qEdge.signals.slice(0,5).join(' | '), 'b');
+    log('RECHECK result: ' + qEdge.direction.toUpperCase()
+      + ' | edge ' + (qEdge.edge * 100).toFixed(1) + '%'
+      + ' | consensus=' + qEdge.hasConsensus
+      + ' | ' + (qEdge.summary || ''), qEdge.direction === 'skip' ? 'a' : 'g');
+
+    if (qEdge.hasConsensus && qEdge.direction !== 'skip' && S.armed && !S.paused && !S.haltNewTrades) {
+      log('RECHECK: consensus found — evaluating trade...', 'o');
+      // Feed into Claude for final confirmation
+      var bid = parseFloat(mkt.yes_bid_dollars || 0) * 100;
+      var ask = parseFloat(mkt.yes_ask_dollars || 0) * 100;
+      var mid = (bid + ask) / 2;
+      var yesPrice = Math.round(mid);
+      var assetLabel = assetCode + '/15m';
+      var prompt = getStrategyPrompt(assetLabel, '15m', mkt, yesPrice, parseFloat(mkt.volume_24h_fp || 0), '', strikeInfo ? strikeInfo.strike : null, true, qEdge);
+      callClaude(prompt).then(function(signal) {
+        if (signal && signal.direction !== 'skip' && signal.direction === qEdge.direction) {
+          log('RECHECK: AI confirmed — ' + signal.direction.toUpperCase() + ' at ' + signal.confidence + '% confidence', 'g');
+          addSignal(signal.direction, mktTitle.substring(0,28), 0, '[RECHECK] ' + (signal.reason || ''), signal.confidence, mkt.ticker);
+        } else {
+          log('RECHECK: AI did not confirm — skipping', 'a');
+        }
+      });
+    } else {
+      addSignal('skip', mktTitle.substring(0,28), 0, '[RECHECK] ' + (qEdge.summary || 'no consensus'), Math.round(qEdge.absEdge * 100), mkt.ticker);
+    }
+  });
+}
+
+var LOADED_MARKETS = []; // cache of last market fetch for recheck
+
+function addSignal(dir, mkt, stake, reason, confidence, ticker) {
   var sl = document.getElementById('signalList');
   var emp = sl.querySelector('.empty');
   if (emp) emp.remove();
+
+  // Build Kalshi market URL if we have a ticker
+  var kalshiUrl = ticker
+    ? 'https://kalshi.com/markets/' + ticker.toLowerCase().replace(/_/g, '-')
+    : null;
+
+  var linkHtml = kalshiUrl
+    ? '<a href="' + kalshiUrl + '" target="_blank" style="font-size:8px;color:var(--orange);font-family:var(--mono);letter-spacing:0.1em;text-decoration:none;border:1px solid rgba(255,85,0,0.3);padding:1px 5px;border-radius:2px;flex-shrink:0;margin-left:4px" title="View on Kalshi">VIEW ↗</a>'
+    : '';
+  var safeTicker = ticker ? ticker : '';
+  var recheckHtml = ticker
+    ? '<button onclick="recheckMarket(this.dataset.t,this.dataset.m)" data-t="' + safeTicker + '" data-m="' + mkt.replace(/"/g,"") + '" style="font-size:8px;color:var(--cyan);font-family:var(--mono);letter-spacing:0.1em;background:transparent;border:1px solid rgba(0,212,255,0.3);padding:1px 5px;border-radius:2px;cursor:pointer;flex-shrink:0;margin-left:4px" title="Force re-scan this market now">SCAN ⟳</button>'
+    : '';
+
   var e = document.createElement('div');
   e.className = 'signal ' + dir;
+  e.style.cssText = 'display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap';
   e.innerHTML = '<span class="sig-dir ' + dir + '">' + dir.toUpperCase() + '</span>'
-    + '<span class="sig-body"><strong>' + mkt + '</strong><br>' + reason + ' - ' + confidence + '% conf.</span>'
-    + '<span class="sig-stake">' + (dir === 'skip' ? 'SKIP' : '$' + stake.toFixed(2)) + '</span>';
+    + '<span class="sig-body" style="flex:1;min-width:0"><strong>' + mkt + '</strong><br>' + reason + ' — ' + confidence + '% conf.</span>'
+    + '<span class="sig-stake" style="flex-shrink:0">' + (dir === 'skip' ? 'SKIP' : '$' + stake.toFixed(2)) + '</span>'
+    + linkHtml + recheckHtml;
   sl.insertBefore(e, sl.firstChild);
-  while (sl.children.length > 8) sl.removeChild(sl.lastChild);
+  while (sl.children.length > 12) sl.removeChild(sl.lastChild);
 }
 
 function updateAll() {
@@ -3035,12 +3125,12 @@ function runCycle() {
           var chg24 = liveData.change24h;
           if (chg24 > 3 && qEdge.direction === 'no') {
             log('TREND BLOCK: ' + asset + ' +' + chg24.toFixed(1) + '% today — not betting NO on 15m up/down', 'a');
-            addSignal('skip', mktTitle.substring(0,28), 0, 'fighting strong uptrend', 50);
+            addSignal('skip', mktTitle.substring(0,28), 0, 'fighting strong uptrend', 50, mkt.ticker);
             updateAll(); return;
           }
           if (chg24 < -3 && qEdge.direction === 'yes') {
             log('TREND BLOCK: ' + asset + ' ' + chg24.toFixed(1) + '% today — not betting YES against downtrend', 'a');
-            addSignal('skip', mktTitle.substring(0,28), 0, 'fighting strong downtrend', 50);
+            addSignal('skip', mktTitle.substring(0,28), 0, 'fighting strong downtrend', 50, mkt.ticker);
             updateAll(); return;
           }
 
@@ -3049,12 +3139,12 @@ function runCycle() {
           if (vel5 !== null) {
             if (vel5 < -0.2 && qEdge.direction === 'yes') {
               log('VELOCITY BLOCK: ' + asset + ' falling ' + vel5.toFixed(2) + '% in 5m — not betting YES', 'a');
-              addSignal('skip', mktTitle.substring(0,28), 0, 'price falling 5m', 50);
+              addSignal('skip', mktTitle.substring(0,28), 0, 'price falling 5m', 50, mkt.ticker);
               updateAll(); return;
             }
             if (vel5 > 0.2 && qEdge.direction === 'no') {
               log('VELOCITY BLOCK: ' + asset + ' rising +' + vel5.toFixed(2) + '% in 5m — not betting NO', 'a');
-              addSignal('skip', mktTitle.substring(0,28), 0, 'price rising 5m', 50);
+              addSignal('skip', mktTitle.substring(0,28), 0, 'price rising 5m', 50, mkt.ticker);
               updateAll(); return;
             }
           }
@@ -3070,14 +3160,14 @@ function runCycle() {
                 // Price is above strike — YES is overwhelmingly likely
                 // Betting NO means betting on a crash — block this
                 log('REALITY BLOCK: ' + asset + ' at $' + livePx.toFixed(0) + ' is ' + distAbove.toFixed(1) + '% ABOVE target $' + strike.toFixed(0) + ' — NO bet is suicidal', 'r');
-                addSignal('skip', mktTitle.substring(0,28), 0, 'price above strike — NO impossible', 50);
+                addSignal('skip', mktTitle.substring(0,28), 0, 'price above strike — NO impossible', 50, mkt.ticker);
                 updateAll(); return;
               }
               if (distAbove < -0.5) {
                 // Price is below strike — NO is overwhelmingly likely
                 // Betting YES means betting on a surge — block this too
                 log('REALITY BLOCK: ' + asset + ' at $' + livePx.toFixed(0) + ' is ' + Math.abs(distAbove).toFixed(1) + '% BELOW target $' + strike.toFixed(0) + ' — YES bet is suicidal', 'r');
-                addSignal('skip', mktTitle.substring(0,28), 0, 'price below strike — YES impossible', 50);
+                addSignal('skip', mktTitle.substring(0,28), 0, 'price below strike — YES impossible', 50, mkt.ticker);
                 updateAll(); return;
               }
             }
@@ -3088,7 +3178,7 @@ function runCycle() {
         var dirMult = getDirectionEdgeMultiplier(qEdge.direction);
         if (dirMult === 0) {
           log('DIRECTION SUPPRESSED: ' + qEdge.direction.toUpperCase() + ' has <35% win rate — skipping', 'r');
-          addSignal('skip', mktTitle.substring(0,28), 0, qEdge.direction + ' direction losing', 50);
+          addSignal('skip', mktTitle.substring(0,28), 0, qEdge.direction + ' direction losing', 50, mkt.ticker);
           updateAll(); return;
         }
 
@@ -3122,14 +3212,14 @@ function runCycle() {
           var quantAgrees = qEdge.direction === 'skip' || qEdge.direction === dir;
           if (!quantAgrees) {
             log('BLOCKED: AI says ' + dir.toUpperCase() + ' but quant says ' + qEdge.direction.toUpperCase() + ' — no trade', 'r');
-            addSignal('skip', mktTitle.substring(0,28), 0, 'AI/quant conflict', conf);
+            addSignal('skip', mktTitle.substring(0,28), 0, 'AI/quant conflict', conf, mkt.ticker);
             updateAll(); return;
           }
           // Block direction if historically losing badly on it
           var dirMultiplier = getDirectionEdgeMultiplier(dir);
           if (dirMultiplier === 0) {
             log('BLOCKED: ' + dir.toUpperCase() + ' direction has <35% WR — skipping', 'r');
-            addSignal('skip', mktTitle.substring(0,28), 0, dir + ' direction suppressed', conf);
+            addSignal('skip', mktTitle.substring(0,28), 0, dir + ' direction suppressed', conf, mkt.ticker);
             updateAll(); return;
           }
           if (dirMultiplier < 1.0) {
@@ -3141,7 +3231,7 @@ function runCycle() {
           var patternMult = getPatternMultiplier(mkt.ticker, dir);
           if (patternMult === 0) {
             log('PATTERN BLOCKED: ' + (mkt._label||seriesKey) + ' ' + dir.toUpperCase() + ' has <30% WR — skipping', 'r');
-            addSignal('skip', mktTitle.substring(0,28), 0, 'pattern suppressed', conf);
+            addSignal('skip', mktTitle.substring(0,28), 0, 'pattern suppressed', conf, mkt.ticker);
             updateAll(); return;
           }
           if (patternMult < 1.0) {
@@ -3152,7 +3242,7 @@ function runCycle() {
           log('Signal: ' + dir.toUpperCase() + ' | ' + conf + '% conf | edge ' + (edge*100).toFixed(2) + '% (min: ' + (minEdge*100).toFixed(1) + '%) | quant: ' + (qEdge.edge*100).toFixed(1) + '%', dir === 'skip' ? 'a' : 'g');
 
           if (dir === 'skip' || edge < minEdge) {
-            addSignal('skip', mktTitle.substring(0, 28), 0, signal.reason || 'edge below threshold', conf);
+            addSignal('skip', mktTitle.substring(0, 28), 0, signal.reason || 'edge below threshold', conf, mkt.ticker);
             updateAll(); return;
           }
 
@@ -3163,7 +3253,7 @@ function runCycle() {
           if (stake < 0.50) { log('Stake $' + stake.toFixed(2) + ' below minimum - skip', 'a'); updateAll(); return; }
           if (stake > S.cash) { log('Insufficient funds ($' + S.cash.toFixed(2) + ')', 'r'); updateAll(); return; }
 
-          addSignal(dir, mktTitle.substring(0, 28), stake, signal.reason || 'AI confirmed', conf);
+          addSignal(dir, mktTitle.substring(0, 28), stake, signal.reason || 'AI confirmed', conf, mkt.ticker);
           // price = what you pay per contract
           // YES bet: pay yesPrice cents per contract
           // NO bet: pay (100 - yesPrice) cents per contract
@@ -4812,7 +4902,7 @@ function forceRunCycle() {
           var actual = (count * ppc).toFixed(2);
 
           log('PIERCE: ' + dir.toUpperCase() + ' ' + count + 'x @ ' + price + 'c = $' + actual + ' | ' + (signal.reason||''), 'g');
-          addSignal(dir, mktTitle.substring(0, 28), parseFloat(actual), '[PTH] ' + (signal.reason || ''), signal.confidence || 70);
+          addSignal(dir, mktTitle.substring(0, 28), parseFloat(actual), '[PTH] ' + (signal.reason || ''), signal.confidence || 70, mkt.ticker);
           soundTrade();
 
           if (parseFloat(actual) > S.cash) { log('Insufficient funds', 'r'); return; }
@@ -6650,7 +6740,7 @@ function updateSignalAnnotations() {
             : sig.includes('Vel:') || sig.includes('OB:') ? 'rgba(255,165,0,0.8)'
             : sig.includes('WIN') || sig.includes('YES') || sig.includes('▲') ? 'rgba(0,200,100,0.8)'
             : 'rgba(255,255,255,0.4)';
-    return '<div style="padding:2px 7px;border:1px solid ' + col + ';font-size:8px;font-family:var(--display);color:' + col + ';border-radius:2px;white-space:nowrap">' + sig.substring(0,32) + '</div>';
+    return '<div style="padding:2px 7px;border:1px solid ' + col + ';font-size:8px;font-family:var(--display);color:' + col + ';border-radius:2px;word-break:break-word">' + sig.substring(0,48) + '</div>';
   }).join('');
 }
 
@@ -6677,7 +6767,7 @@ function renderPartnerLog() {
       + '<span style="color:var(--tx3);font-size:8px">' + timeStr + '</span>'
       + ' <span style="color:var(--orange)">' + entry.question.substring(0,60) + (entry.question.length>60?'...':'') + '</span>'
       + '</div>'
-      + '<div style="padding:6px 8px;color:var(--tx2);line-height:1.6;white-space:pre-wrap">' + entry.answer + '</div>'
+      + '<div style="padding:6px 8px;color:var(--tx2);line-height:1.6;white-space:pre-wrap;word-break:break-word">' + entry.answer + '</div>'
       + '</div>';
   }).join('');
 }
