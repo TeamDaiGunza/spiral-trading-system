@@ -284,12 +284,13 @@ button:active{transform:scale(0.97)}
 .kv{color:var(--orange2);font-weight:700;text-shadow:0 0 8px rgba(255,136,0,0.5)}
 
 /* ── SIGNALS ── */
-.signal-list{display:flex;flex-direction:column;gap:5px;max-height:195px;overflow-y:auto}
+.signal-list{display:flex;flex-direction:column;gap:4px;max-height:340px;overflow-y:auto}
 .signal{
-  display:flex;align-items:flex-start;gap:8px;padding:7px 10px;
+  display:flex;align-items:center;gap:6px;padding:6px 8px;
   border:1px solid var(--bd);font-size:11px;
   background:rgba(0,0,0,0.4);position:relative;overflow:hidden;
   transition:border-color .2s;
+  min-height:40px;flex-shrink:0;
 }
 .signal::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px}
 .signal.yes::before{background:linear-gradient(180deg,var(--orange),var(--orange2));box-shadow:2px 0 8px rgba(255,85,0,0.5)}
