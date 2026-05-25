@@ -476,6 +476,44 @@ body {
   margin-right:6px;
 }
 
+/* ── UPDATE BANNER ── */
+#updateBanner {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: rgba(6,5,10,0.97);
+  border-top: 2px solid var(--orange);
+  padding: 0;
+  z-index: 9999;
+  transform: translateY(100%);
+  transition: transform 0.4s cubic-bezier(0.16,1,0.3,1);
+  font-family: var(--display);
+}
+#updateBanner.show { transform: translateY(0); }
+#updateBanner .ub-inner {
+  max-width: 1280px; margin: 0 auto;
+  padding: 14px 24px;
+  display: flex; align-items: center; gap: 16px;
+}
+#updateBanner .ub-icon { font-size: 18px; flex-shrink: 0; }
+#updateBanner .ub-text { flex: 1; }
+#updateBanner .ub-title { font-size: 12px; font-weight: 700; letter-spacing: 0.12em; color: var(--orange); }
+#updateBanner .ub-sub { font-size: 10px; color: var(--tx2); letter-spacing: 0.08em; margin-top: 2px; font-family: var(--mono); }
+#updateBanner .ub-progress {
+  width: 200px; height: 3px; background: rgba(255,85,0,0.15);
+  border-radius: 2px; overflow: hidden; flex-shrink: 0; display: none;
+}
+#updateBanner .ub-bar { height: 100%; background: var(--orange); width: 0%; transition: width 0.3s; }
+#updateBanner .ub-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.ub-btn {
+  padding: 7px 16px; font-family: var(--display); font-size: 10px;
+  font-weight: 600; letter-spacing: 0.12em; border: none; cursor: pointer;
+  transition: all 0.15s; border-radius: 2px;
+}
+.ub-btn-primary { background: var(--orange); color: #fff; }
+.ub-btn-primary:hover { background: var(--orange2); }
+.ub-btn-secondary { background: transparent; color: var(--tx3); border: 1px solid var(--bd2); }
+.ub-btn-secondary:hover { color: var(--tx); border-color: var(--tx3); }
+
 /* ── BUTTON BASE STYLES ── */
 button { outline: none; }
 button:focus-visible { outline: 1px solid var(--orange); outline-offset: 2px; }
@@ -1575,6 +1613,10 @@ function updateAll() {
 }
 
 function updateMetrics() {
+  // Always derive session P&L from real balance diff — never trust accumulated S.pnl
+  if (S.startPortfolio > 0 && S.cash > 0) {
+    S.pnl = S.cash - S.startPortfolio;
+  }
   drawPredictionChart();
   // Always keep portfolio consistent: cash + open exposure
   S.portfolio = S.cash; // Kalshi balance already reflects deducted stakes
@@ -1586,9 +1628,15 @@ function updateMetrics() {
   document.getElementById('mExp').textContent  = '$' + Math.max(0, S.exposure).toFixed(2);
   var pEl = document.getElementById('mPnl');
   if (pEl) {
-    var safePnl = isNaN(S.pnl) ? 0 : S.pnl;
-  pEl.textContent = (safePnl >= 0 ? '+$' : '-$') + Math.abs(safePnl).toFixed(2);
-    pEl.className = 'metric-val ' + (S.pnl > 0 ? 'g' : S.pnl < 0 ? 'r' : '');
+    // Always compute from real balance diff — never trust local accumulation
+    // Always cash vs starting cash — clean and consistent
+    var realPnl = (S.startPortfolio > 0 && S.cash > 0)
+      ? (S.cash - S.startPortfolio)
+      : (S.pnl || 0);
+    S.pnl = realPnl;
+    var safePnl = isNaN(realPnl) ? 0 : realPnl;
+    pEl.textContent = (safePnl >= 0 ? '+$' : '-$') + Math.abs(safePnl).toFixed(2);
+    pEl.className = 'metric-val ' + (safePnl > 0.005 ? 'g' : safePnl < -0.005 ? 'r' : '');
   }
   var tot = S.wins + S.losses;
   var wrEl = document.getElementById('mWr');
@@ -1778,7 +1826,11 @@ function renderPositions() {
     + all.map(function(p) {
         var isOpen = p.status === 'open';
         var pnlColor = (p.pnl != null && p.pnl >= 0) ? 'var(--orange2)' : 'var(--red2)';
-        var pnlText  = p.pnl != null ? ((p.pnl >= 0 ? '+' : '') + '$' + p.pnl.toFixed(2)) : '—';
+        // pnl = net profit after fees (NOT including stake recovery — stake is separate)
+        // e.g. stake $1.12, win payout $7.92 gross, net pnl = $7.92 - $1.12 = $6.80
+        var pnlText = p.pnl != null
+          ? ((p.pnl >= 0 ? '+' : '') + '$' + Math.abs(p.pnl).toFixed(2))
+          : '—';
 
         // Status badge with fill state
         var fillStatus = p.fillStatus || (isOpen ? 'pending' : 'settled');
@@ -1801,7 +1853,7 @@ function renderPositions() {
             + (fillStatus === 'pending' ? 'CANCEL' : 'CLOSE')
             + '</button>'
           : '<span style="color:var(--tx3);font-size:9px;font-family:var(--display)">'
-            + (p.pnl != null && p.pnl > 0 ? 'WIN' : p.pnl != null ? 'LOSS' : '—') + '</span>';
+            + (p.won === true ? 'WIN' : p.won === false ? 'LOSS' : p.pnl != null && p.pnl > 0 ? 'WIN' : p.pnl != null ? 'LOSS' : '—') + '</span>';
 
         return '<tr>'
           + '<td style="max-width:0">' + p.mkt + '</td>'
@@ -1978,6 +2030,7 @@ function callClaude(prompt) {
 }
 
 function fetchBalance() {
+  var cashBefore = S.cash;
   return apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/balance').then(function(d) {
     // Kalshi balance response fields:
     // balance: cents of available cash (what you can trade with)
@@ -2000,12 +2053,14 @@ function fetchBalance() {
     if (S.cash >= 0) {
       S.portfolio = S.cash + positionValue;
       if (!S.startPortfolio) {
-        S.startPortfolio = S.portfolio;
-        log('Session start: cash=$' + S.cash.toFixed(2) + ' positions=$' + positionValue.toFixed(2) + ' total=$' + S.startPortfolio.toFixed(2), 'b');
+        // Baseline is CASH ONLY — not including open positions
+        // Open position value fluctuates and causes false P&L readings
+        S.startPortfolio = S.cash;
+        log('Session start: cash=$' + S.cash.toFixed(2) + ' (baseline set, excluding $' + positionValue.toFixed(2) + ' open positions)', 'b');
       }
-      if (!PROTECTED_PRINCIPAL) PROTECTED_PRINCIPAL = S.portfolio;
-      // P&L = real total portfolio vs session start
-      S.pnl = S.portfolio - S.startPortfolio;
+      if (!PROTECTED_PRINCIPAL) PROTECTED_PRINCIPAL = S.cash;
+      // P&L = current cash vs starting cash — positions settle into cash
+      S.pnl = S.cash - S.startPortfolio;
       balanceReadings++;
       updateMetrics();
     }
@@ -4301,18 +4356,19 @@ function settlePosition(pos, won, payoutDollars) {
   var FEE = 0.01;
   var pnl;
 
-  if (payoutDollars !== 0 && payoutDollars !== null && payoutDollars !== undefined) {
-    // Pre-calculated P&L passed in (from balance delta or early exit)
-    // If it's a large positive number it might be gross payout — detect and convert
-    var maxPossiblePnl = (pos.contracts||1) * 0.99; // max net win
+  if (!won) {
+    // Loss is always the full stake — no calculation needed
+    pnl = -pos.stake;
+    log('Settle [LOSS]: -$' + pos.stake.toFixed(2) + ' staked and lost', 'r');
+  } else if (payoutDollars !== 0 && payoutDollars !== null && payoutDollars !== undefined) {
+    // Win with pre-calculated payout from balance delta
+    var maxPossiblePnl = (pos.contracts||1) * 0.99;
     if (payoutDollars > maxPossiblePnl * 2) {
-      // Looks like gross payout was passed — convert to net
       pnl = payoutDollars - pos.stake;
-      log('Settle [gross→net]: payout=$' + payoutDollars.toFixed(2) + ' stake=$' + pos.stake.toFixed(2) + ' pnl=$' + pnl.toFixed(2), 'b');
+      log('Settle [WIN gross→net]: payout=$' + payoutDollars.toFixed(2) + ' - stake=$' + pos.stake.toFixed(2) + ' = net $' + pnl.toFixed(2), 'g');
     } else {
-      // Net P&L passed directly
       pnl = payoutDollars;
-      log('Settle [net P&L]: $' + pnl.toFixed(2) + ' | won=' + won, 'b');
+      log('Settle [WIN net P&L]: +$' + pnl.toFixed(2), 'g');
     }
   } else if (won) {
     // Kalshi pays $1.00 per contract on win
@@ -4348,12 +4404,12 @@ function settlePosition(pos, won, payoutDollars) {
   // Only update exposure tracking for UI display
   S.exposure = Math.max(0, S.exposure - pos.stake);
   // Keep S.pnl as running estimate until fetchBalance corrects it
-  S.pnl = (S.pnl || 0) + pnl;
+  // S.pnl updated by updateMetrics from real balance — don't accumulate locally
   if (won) { S.wins++; S.consLoss = 0; onTradeWin(pos.stake); }
   else      { S.losses++; S.consLoss++; onTradeLoss(pos.stake); }
   if (tpWatchers[pos.id])       { clearInterval(tpWatchers[pos.id]); delete tpWatchers[pos.id]; }
   if (momentumWatchers[pos.id]) { clearInterval(momentumWatchers[pos.id]); delete momentumWatchers[pos.id]; }
-  pos.pnl = pnl; pos.status = 'closed';
+  pos.pnl = pnl; pos.won = won; pos.status = 'closed';
   S.positions = S.positions.filter(function(p) { return p.id !== pos.id; });
   S.history = S.history || [];
   if (pos._manual) pos.mkt = '[MANUAL] ' + (pos.mkt || '').replace('[MANUAL] ','');
@@ -4366,7 +4422,14 @@ function settlePosition(pos, won, payoutDollars) {
     soundLoss(); showResultPanel(false);
     sysNotify('💀 DEFEAT — The Spiral', pos.dir.toUpperCase() + ' ' + pos.mkt + ' | -$' + Math.abs(pnl).toFixed(2), 'low');
   }
-  pnlHistory.push({ t: Date.now(), v: S.pnl });
+  // Push real P&L (balance diff) not stale accumulated S.pnl
+  // Push cash-vs-start as session P&L — wait 3s for balance to update first
+  setTimeout(function() {
+    var realPnlNow = S.startPortfolio > 0 && S.cash > 0
+      ? (S.cash - S.startPortfolio)
+      : pnl;
+    pnlHistory.push({ t: Date.now(), v: realPnlNow });
+  }, 3000);
   if (pnlHistory.length > 200) pnlHistory.shift();
   recordTradeOutcome(pos.ticker || pos.mkt, won, pnl);
   resolvePrediction(pos.id, won, pnl);
@@ -4379,7 +4442,16 @@ function settlePosition(pos, won, payoutDollars) {
   // Pull real balance from Kalshi — twice for safety (payout may be delayed)
   setTimeout(function() {
     fetchBalance().then(function() {
-      log('Reconciled: real balance=$' + S.cash.toFixed(2) + ' | session P&L=$' + S.pnl.toFixed(2), 'b');
+      var realPnlNow2 = S.startPortfolio > 0 ? S.cash - S.startPortfolio : 0;
+      S.pnl = realPnlNow2;
+      if (pnlHistory.length === 0 || Math.abs(realPnlNow2 - pnlHistory[pnlHistory.length-1].v) > 0.001
+          || Date.now() - pnlHistory[pnlHistory.length-1].t > 60000) {
+        pnlHistory.push({ t: Date.now(), v: realPnlNow2 });
+        if (pnlHistory.length > 200) pnlHistory.shift();
+      }
+      log('Balance: $' + cashBefore.toFixed(2) + ' → $' + S.cash.toFixed(2)
+        + ' | session P&L=' + (realPnlNow2 >= 0 ? '+' : '') + '$' + realPnlNow2.toFixed(2)
+        + ' (start: $' + S.startPortfolio.toFixed(2) + ')', 'b');
     });
   }, 2000);
   setTimeout(fetchBalance, 8000);
@@ -4550,9 +4622,9 @@ function pollMarketResult(pos, attempts) {
           log('WIN settled with estimate (payout delayed): net $' + estimatedPnl.toFixed(2), 'a');
           settlePosition(pos, true, Math.max(0, estimatedPnl));
         } else {
-          // Loss — settle immediately, no payout expected
+          // Loss — you lose the stake, period
           log('LOSS confirmed — $' + pos.stake.toFixed(2) + ' lost', 'r');
-          settlePosition(pos, false, -pos.stake);
+          settlePosition(pos, false, -pos.stake); // always negative stake on loss
         }
       });
     }, 6000);
@@ -5104,6 +5176,13 @@ document.getElementById('saveBtn').addEventListener('click', function() {
     setInterval(checkConnections, 30000);
     fetchLivePrices();
     setInterval(fetchLivePrices, 15000); // 15s for live chart updates
+    // Push P&L history point every 60s so chart always shows movement
+    setInterval(function() {
+      if (!S.armed || !S.startPortfolio) return;
+      var v = S.startPortfolio > 0 ? S.cash - S.startPortfolio : 0;
+      pnlHistory.push({ t: Date.now(), v: v });
+      if (pnlHistory.length > 200) pnlHistory.shift();
+    }, 60000);
   });
   }).catch(function(e) { errEl.textContent = 'Connection error: ' + e.message; errEl.style.display = 'block'; });
 });
@@ -6151,6 +6230,142 @@ function updateIndicatorCharts() {
 }
 
 // ── Trading partner ────────────────────────────────────────────────
+// ── Auto-update manager ───────────────────────────────────────────
+var UPDATE_STATE = {
+  available: false,
+  downloaded: false,
+  version: null,
+  shutdownInProgress: false
+};
+
+function showUpdateBanner(title, sub, actions) {
+  var banner = document.getElementById('updateBanner');
+  var titleEl = document.getElementById('ubTitle');
+  var subEl   = document.getElementById('ubSub');
+  var actEl   = document.getElementById('ubActions');
+  if (!banner) return;
+  if (titleEl) titleEl.textContent = title;
+  if (subEl)   subEl.textContent   = sub;
+  if (actEl)   actEl.innerHTML     = actions || '';
+  banner.classList.add('show');
+}
+
+function hideUpdateBanner() {
+  var banner = document.getElementById('updateBanner');
+  if (banner) banner.classList.remove('show');
+}
+
+function beginGracefulShutdown(version) {
+  if (UPDATE_STATE.shutdownInProgress) return;
+  UPDATE_STATE.shutdownInProgress = true;
+
+  log('UPDATE v' + version + ': beginning graceful shutdown...', 'o');
+  showUpdateBanner(
+    'INSTALLING UPDATE v' + version,
+    'Disarming bot and waiting for open positions to settle...',
+    ''
+  );
+
+  // Step 1: Disarm — stop new trades
+  if (S.armed) {
+    disarm();
+    log('UPDATE: System disarmed — no new trades will be placed', 'a');
+  }
+
+  // Step 2: Wait for open bot positions to settle (max 5 minutes)
+  var maxWait = 5 * 60 * 1000; // 5 minutes
+  var started = Date.now();
+  var checkInterval = setInterval(function() {
+    var openBotPos = S.positions.filter(function(p) {
+      return !p._settled && p._botPlaced && p.fillStatus === 'filled';
+    });
+    var elapsed = Date.now() - started;
+    var remaining = Math.max(0, Math.ceil((maxWait - elapsed) / 1000));
+
+    if (openBotPos.length === 0) {
+      // All positions settled — safe to install
+      clearInterval(checkInterval);
+      log('UPDATE: All positions settled — installing v' + version, 'g');
+      showUpdateBanner(
+        'INSTALLING UPDATE v' + version,
+        'All positions settled. Installing now — app will restart automatically.',
+        ''
+      );
+      setTimeout(function() {
+        if (window.electronAPI) window.electronAPI.readyToInstall();
+      }, 2000);
+    } else if (elapsed >= maxWait) {
+      // Timeout — install anyway with warning
+      clearInterval(checkInterval);
+      log('UPDATE: Timeout waiting for ' + openBotPos.length + ' position(s) — installing anyway', 'r');
+      showUpdateBanner(
+        'INSTALLING UPDATE v' + version,
+        openBotPos.length + ' position(s) still open — installing now. Check Kalshi manually.',
+        ''
+      );
+      setTimeout(function() {
+        if (window.electronAPI) window.electronAPI.readyToInstall();
+      }, 3000);
+    } else {
+      // Still waiting
+      showUpdateBanner(
+        'UPDATE v' + version + ': WAITING FOR POSITIONS',
+        openBotPos.length + ' position(s) still open — max wait ' + remaining + 's remaining',
+        ''
+      );
+    }
+  }, 3000);
+}
+
+// Wire up Electron update events if available
+if (window.electronAPI) {
+  window.electronAPI.onUpdateAvailable(function(version) {
+    UPDATE_STATE.available = true;
+    UPDATE_STATE.version   = version;
+    log('UPDATE v' + version + ' available — downloading in background', 'b');
+    showUpdateBanner(
+      'UPDATE v' + version + ' AVAILABLE',
+      'Downloading in the background — trading continues normally',
+      '<div class="ub-progress" id="ubProgress" style="display:block"><div class="ub-bar" id="ubBar"></div></div>'
+    );
+  });
+
+  window.electronAPI.onUpdateProgress(function(percent) {
+    var bar = document.getElementById('ubBar');
+    var prog = document.getElementById('ubProgress');
+    if (prog) prog.style.display = 'block';
+    if (bar)  bar.style.width = percent + '%';
+    var subEl = document.getElementById('ubSub');
+    if (subEl) subEl.textContent = 'Downloading... ' + percent + '%';
+  });
+
+  window.electronAPI.onUpdateDownloaded(function(version) {
+    UPDATE_STATE.downloaded = true;
+    UPDATE_STATE.version    = version;
+    log('UPDATE v' + version + ' ready — will install after current session', 'g');
+
+    // Show banner with options: Install Now or Defer
+    showUpdateBanner(
+      'UPDATE v' + version + ' READY TO INSTALL',
+      S.armed
+        ? 'Bot will disengage, wait for open positions, then install automatically.'
+        : 'Bot is not running. App will restart to install.',
+      '<button class="ub-btn ub-btn-primary" id="ubInstallBtn" onclick="beginGracefulShutdown(document.getElementById(\'ubInstallBtn\').dataset.v)" data-v="' + version + '">INSTALL NOW</button>'
+      + '<button class="ub-btn ub-btn-secondary" onclick="hideUpdateBanner()">LATER</button>'
+    );
+
+    // If bot is not armed, just install immediately after 10 seconds
+    if (!S.armed) {
+      setTimeout(function() {
+        if (!S.armed && UPDATE_STATE.downloaded) {
+          log('UPDATE: Bot not running — auto-installing v' + version, 'b');
+          beginGracefulShutdown(version);
+        }
+      }, 10000);
+    }
+  });
+}
+
 // ── Live chart animator ───────────────────────────────────────────
 var CHART_ANIM_INTERVAL = null;
 
@@ -6175,6 +6390,8 @@ function startLiveCharts() {
   var _chartFrame = 0;
   CHART_ANIM_INTERVAL = setInterval(function() {
     _chartFrame++;
+    // P&L chart: always update (visible on dashboard)
+    updatePnlChart();
     // Signal chart: every frame (1s) if visible
     var signalsActive = document.getElementById('psec-signals');
     if (signalsActive && signalsActive.style.display !== 'none') {
@@ -6728,6 +6945,13 @@ function tryConnect(attempts) {
           setInterval(checkConnections, 30000);
     fetchLivePrices();
     setInterval(fetchLivePrices, 15000); // 15s for live chart updates
+    // Push P&L history point every 60s so chart always shows movement
+    setInterval(function() {
+      if (!S.armed || !S.startPortfolio) return;
+      var v = S.startPortfolio > 0 ? S.cash - S.startPortfolio : 0;
+      pnlHistory.push({ t: Date.now(), v: v });
+      if (pnlHistory.length > 200) pnlHistory.shift();
+    }, 60000);
         });
         if (d.hasWebull) {
       if (d.webullAppKey) {
@@ -6810,5 +7034,20 @@ setTimeout(function() {
   }
 }, 15000);
 </script>
+<!-- Update banner — slides up from bottom when update available -->
+<div id="updateBanner">
+  <div class="ub-inner">
+    <div class="ub-icon">⬆</div>
+    <div class="ub-text">
+      <div class="ub-title" id="ubTitle">UPDATE AVAILABLE</div>
+      <div class="ub-sub" id="ubSub">Downloading in background...</div>
+    </div>
+    <div class="ub-progress" id="ubProgress">
+      <div class="ub-bar" id="ubBar"></div>
+    </div>
+    <div class="ub-actions" id="ubActions"></div>
+  </div>
+</div>
+
 </body>
 </html>
