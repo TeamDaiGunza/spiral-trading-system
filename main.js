@@ -1,4 +1,5 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path   = require('path');
 const http   = require('http');
 const https  = require('https');
@@ -14,10 +15,15 @@ const MOB_FILE  = path.join(__dirname, 'mobile.html');
 function findAssetRoot() {
   const candidates = [
     __dirname,
+    // Portable exe: unpacked next to exe
+    path.join(path.dirname(process.execPath || app.getPath('exe')), 'resources', 'app'),
+    path.join(path.dirname(process.execPath || app.getPath('exe')), 'resources', 'app.asar.unpacked'),
+    // Installed version
     path.join(process.resourcesPath || '', 'app'),
     path.join(process.resourcesPath || '', 'app.asar.unpacked'),
     path.join(path.dirname(app.getPath('exe')), 'resources', 'app'),
-    path.join(path.dirname(process.execPath || ''), 'resources', 'app'),
+    // Fallback: same dir as exe
+    path.dirname(process.execPath || app.getPath('exe')),
   ];
   for (const candidate of candidates) {
     try {
@@ -412,6 +418,7 @@ app.whenReady().then(() => {
     console.log('Backend server running on port ' + PORT);
   });
 
+
   // Handle system notifications from renderer
   const { ipcMain, Notification } = require('electron');
   ipcMain.on('notify', (event, opts) => {
@@ -425,6 +432,69 @@ app.whenReady().then(() => {
       }).show();
     }
   });
+
+  // ── Auto-updater ─────────────────────────────────────────────────
+  // Silent download, graceful trading shutdown before install
+
+  autoUpdater.autoDownload    = true;   // download silently in background
+  autoUpdater.autoInstallOnAppQuit = false; // we control when it installs
+
+  autoUpdater.on('checking-for-update', () => {
+    console.log('[updater] Checking for update...');
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[updater] Up to date.');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    console.log('[updater] Update available:', info.version);
+    // Notify the renderer — shows a banner but does NOT disrupt trading yet
+    if (mainWindow) {
+      mainWindow.webContents.send('update-available', info.version);
+    }
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    if (mainWindow) {
+      mainWindow.webContents.send('update-progress', Math.round(progress.percent));
+    }
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('[updater] Update downloaded:', info.version);
+    // Tell the renderer the update is ready — renderer will:
+    // 1. Disarm the bot (stop new trades)
+    // 2. Wait for open positions to settle (up to 5 min)
+    // 3. Send 'ready-to-install' back to main
+    if (mainWindow) {
+      mainWindow.webContents.send('update-downloaded', info.version);
+    }
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.log('[updater] Error:', err.message);
+  });
+
+  // Renderer sends this when bot is fully disarmed and positions settled
+  ipcMain.on('ready-to-install', () => {
+    console.log('[updater] Bot confirmed safe — installing update now');
+    autoUpdater.quitAndInstall(true, true); // silent=true, forceRunAfter=true
+  });
+
+  // Manual install trigger (from renderer dismiss/now button)
+  ipcMain.on('install-update-now', () => {
+    console.log('[updater] Manual install triggered');
+    autoUpdater.quitAndInstall(true, true);
+  });
+
+  // Check on launch after 15s (let app settle first), then every hour
+  setTimeout(() => {
+    try { autoUpdater.checkForUpdates(); } catch(e) { console.log('[updater]', e.message); }
+  }, 15000);
+  setInterval(() => {
+    try { autoUpdater.checkForUpdates(); } catch(e) {}
+  }, 60 * 60 * 1000);
 
   server.on('error', e => {
     console.log('Server error:', e.code);

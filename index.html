@@ -6486,7 +6486,7 @@ function beginGracefulShutdown(version) {
 }
 
 // Wire up Electron update events if available
-if (window.electronAPI) {
+if (window.electronAPI && typeof window.electronAPI.onUpdateAvailable === 'function') {
   window.electronAPI.onUpdateAvailable(function(version) {
     UPDATE_STATE.available = true;
     UPDATE_STATE.version   = version;
@@ -6498,6 +6498,7 @@ if (window.electronAPI) {
     );
   });
 
+  if (typeof window.electronAPI.onUpdateProgress === 'function')
   window.electronAPI.onUpdateProgress(function(percent) {
     var bar = document.getElementById('ubBar');
     var prog = document.getElementById('ubProgress');
@@ -6507,6 +6508,7 @@ if (window.electronAPI) {
     if (subEl) subEl.textContent = 'Downloading... ' + percent + '%';
   });
 
+  if (typeof window.electronAPI.onUpdateDownloaded === 'function')
   window.electronAPI.onUpdateDownloaded(function(version) {
     UPDATE_STATE.downloaded = true;
     UPDATE_STATE.version    = version;

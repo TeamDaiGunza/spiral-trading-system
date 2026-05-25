@@ -9,7 +9,9 @@
     "start": "electron .",
     "build:win": "electron-builder --win --x64"
   },
-  "dependencies": {},
+  "dependencies": {
+    "electron-updater": "^6.1.7"
+  },
   "devDependencies": {
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8"
@@ -67,6 +69,27 @@
     "portable": {
       "artifactName": "The-Spiral-Portable.exe"
     },
-    "icon": "icon.png"
+    "icon": "icon.png",
+    "publish": {
+      "provider": "github",
+      "owner": "TeamDaiGunza",
+      "repo": "spiral-trading-system",
+      "releaseType": "release"
+    },
+    "extraResources": [
+      {
+        "from": ".",
+        "to": ".",
+        "filter": [
+          "*.mp4",
+          "*.mp3",
+          "*.png",
+          "*.ico",
+          "*.html",
+          "*.js",
+          "*.json"
+        ]
+      }
+    ]
   }
 }
