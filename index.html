@@ -1346,8 +1346,8 @@ MIIEowIBAAKCAQEA...
       </div>
 
       <!-- SETTINGS tab — clean grouped layout -->
-      <div class="panel-section" id="psec-settings">
-        <div style="padding:12px;overflow-y:auto;height:100%;box-sizing:border-box">
+      <div class="panel-section" id="psec-settings" style="overflow-y:auto">
+        <div style="padding:12px;box-sizing:border-box">
 
           <!-- RISK GROUP -->
           <div style="margin-bottom:16px">
@@ -1477,7 +1477,8 @@ MIIEowIBAAKCAQEA...
           <!-- MARKETS GROUP -->
           <div style="margin-bottom:16px">
             <div style="font-family:var(--display);font-size:9px;color:var(--orange);letter-spacing:0.25em;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--bd)">MARKETS TO TRADE</div>
-            <div class="setting-row">
+            <div style="overflow-x:auto;scrollbar-width:thin">
+            <div class="setting-row" style="min-width:300px">
               <div class="setting-info">
                 <div class="setting-name" data-tip="BTC, ETH, SOL, XRP, DOGE — 15-minute and hourly price direction markets. Best for active trading.">Crypto Markets</div>
                 <div class="setting-desc">BTC, ETH, SOL, XRP, DOGE — 15-min and hourly</div>
@@ -1486,7 +1487,25 @@ MIIEowIBAAKCAQEA...
                 <button class="cfg-btn active" id="cat-crypto" onclick="toggleCategory('crypto',this)">ON</button>
               </div>
             </div>
-            <div class="setting-row">
+            </div>
+
+            <!-- Per-coin toggles — shown when crypto is ON -->
+            <div id="coinToggles" style="margin:8px 0 12px 0;padding:10px;background:rgba(0,0,0,0.2);border:1px solid var(--bd)">
+              <div style="font-family:var(--display);font-size:8px;color:var(--tx3);letter-spacing:0.2em;margin-bottom:8px">COINS TO TRADE</div>
+              <div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin">
+                <button class="cfg-btn active" id="coin-BTC"  onclick="toggleCoin('BTC',this)"  style="min-width:52px;flex-shrink:0">BTC</button>
+                <button class="cfg-btn active" id="coin-ETH"  onclick="toggleCoin('ETH',this)"  style="min-width:52px;flex-shrink:0">ETH</button>
+                <button class="cfg-btn active" id="coin-SOL"  onclick="toggleCoin('SOL',this)"  style="min-width:52px;flex-shrink:0">SOL</button>
+                <button class="cfg-btn active" id="coin-XRP"  onclick="toggleCoin('XRP',this)"  style="min-width:52px;flex-shrink:0">XRP</button>
+                <button class="cfg-btn active" id="coin-DOGE" onclick="toggleCoin('DOGE',this)" style="min-width:52px;flex-shrink:0">DOGE</button>
+                <div style="width:1px;background:var(--bd);flex-shrink:0;margin:0 2px"></div>
+                <button onclick="setAllCoins(true)"  style="font-family:var(--display);font-size:8px;letter-spacing:0.1em;padding:4px 10px;border:1px solid var(--bd);background:transparent;color:var(--tx3);cursor:pointer;flex-shrink:0">ALL</button>
+                <button onclick="setAllCoins(false)" style="font-family:var(--display);font-size:8px;letter-spacing:0.1em;padding:4px 10px;border:1px solid var(--bd);background:transparent;color:var(--tx3);cursor:pointer;flex-shrink:0">NONE</button>
+              </div>
+              <div id="coinStatus" style="font-family:var(--mono);font-size:9px;color:var(--tx3);margin-top:6px">Scanning: BTC · ETH · SOL · XRP · DOGE</div>
+            </div>
+            <div style="overflow-x:auto;scrollbar-width:thin">
+            <div class="setting-row" style="min-width:300px">
               <div class="setting-info">
                 <div class="setting-name" data-tip="S&P 500, Nasdaq, and WTI Oil daily range markets. Slower moving, longer hold times.">Finance Markets</div>
                 <div class="setting-desc">S&amp;P 500, Nasdaq, WTI Oil daily ranges</div>
@@ -1495,7 +1514,9 @@ MIIEowIBAAKCAQEA...
                 <button class="cfg-btn" id="cat-finance" onclick="toggleCategory('finance',this)">OFF</button>
               </div>
             </div>
-            <div class="setting-row">
+            </div>
+            <div style="overflow-x:auto;scrollbar-width:thin">
+            <div class="setting-row" style="min-width:300px">
               <div class="setting-info">
                 <div class="setting-name" data-tip="Federal Reserve rate decisions, CPI inflation reports, jobs numbers. Very infrequent but high volume.">Macro Markets</div>
                 <div class="setting-desc">Fed rate decisions, CPI, jobs report</div>
@@ -1504,7 +1525,9 @@ MIIEowIBAAKCAQEA...
                 <button class="cfg-btn" id="cat-macro" onclick="toggleCategory('macro',this)">OFF</button>
               </div>
             </div>
-            <div class="setting-row">
+            </div>
+            <div style="overflow-x:auto;scrollbar-width:thin">
+            <div class="setting-row" style="min-width:300px">
               <div class="setting-info">
                 <div class="setting-name" data-tip="NBA, NFL, NHL, MLB game outcomes. Good fill-in during off-hours for crypto markets.">Sports Markets</div>
                 <div class="setting-desc">NBA, NFL, NHL, MLB game outcomes</div>
@@ -1512,6 +1535,7 @@ MIIEowIBAAKCAQEA...
               <div class="setting-ctrl">
                 <button class="cfg-btn" id="cat-sports" onclick="toggleCategory('sports',this)">OFF</button>
               </div>
+            </div>
             </div>
             <div id="categoryStatus" style="font-size:10px;color:var(--tx3);padding:6px 0;letter-spacing:0.06em">Active: Crypto only</div>
           </div>
@@ -1574,7 +1598,7 @@ var S = {
   haltNewTrades: false, // stops new trades but keeps monitoring open positions cash: 0, portfolio: 0, startPortfolio: 0,
   pnl: 0, wins: 0, losses: 0, consLoss: 0,
   exposure: 0, positions: [], history: [],
-  cfg: { kelly: 'half', exp: 20, sl: 10, edge: 1.5, cb: 5, maxpos: 6, tp: 1.4, strategy: 'momentum', compound: 'off' },
+  cfg: { kelly: 'half', exp: 20, sl: 10, edge: 1.5, cb: 5, maxpos: 6, tp: 1.4, strategy: 'momentum', compound: 'off', coins: { BTC: true, ETH: true, SOL: true, XRP: true, DOGE: true } },
   connected: false, paperMode: false, cycleTimer: null, riskTimer: null, countdownTimer: null, lastKelly: 0, lastP: 0, lastB: 0, seriesIdx: 0, profitLockActive: false
 };
 
@@ -2189,11 +2213,24 @@ var ENABLED_CATEGORIES = { crypto: true, finance: false, macro: false, sports: f
 
 function getActiveSeries() {
   var pool = [];
-  if (ENABLED_CATEGORIES.crypto)  pool = pool.concat(CRYPTO_SERIES);
+  if (ENABLED_CATEGORIES.crypto) {
+    // Filter crypto series by enabled coins
+    var coins = (S.cfg && S.cfg.coins) || { BTC:true, ETH:true, SOL:true, XRP:true, DOGE:true };
+    var filtered = CRYPTO_SERIES.filter(function(s) {
+      if (s.includes('BTC'))  return coins.BTC  !== false;
+      if (s.includes('ETH'))  return coins.ETH  !== false;
+      if (s.includes('SOL'))  return coins.SOL  !== false;
+      if (s.includes('XRP'))  return coins.XRP  !== false;
+      if (s.includes('DOGE')) return coins.DOGE !== false;
+      if (s.includes('BNB'))  return coins.BTC  !== false; // group with BTC
+      return true;
+    });
+    pool = pool.concat(filtered.length ? filtered : CRYPTO_SERIES);
+  }
   if (ENABLED_CATEGORIES.finance) pool = pool.concat(FINANCE_SERIES);
   if (ENABLED_CATEGORIES.macro)   pool = pool.concat(MACRO_SERIES);
   if (ENABLED_CATEGORIES.sports)  pool = pool.concat(SPORTS_SERIES);
-  return pool.length ? pool : CRYPTO_SERIES; // fallback to crypto
+  return pool.length ? pool : CRYPTO_SERIES;
 }
 
 var MARKET_SERIES = CRYPTO_SERIES; // legacy alias
@@ -5837,6 +5874,45 @@ function syncSignalListFull() {
 }
 
 // ── Market category toggles ───────────────────────────────────────
+function toggleCoin(coin, btn) {
+  if (!S.cfg.coins) S.cfg.coins = { BTC:true, ETH:true, SOL:true, XRP:true, DOGE:true };
+  var isOn = btn.classList.contains('active');
+
+  // Prevent turning off the last coin
+  var enabledCount = Object.values(S.cfg.coins).filter(Boolean).length;
+  if (isOn && enabledCount <= 1) {
+    log('Cannot disable last coin — at least one must be active', 'a');
+    return;
+  }
+
+  S.cfg.coins[coin] = !isOn;
+  if (isOn) { btn.classList.remove('active'); }
+  else       { btn.classList.add('active'); }
+
+  updateCoinStatus();
+  var active = getActiveSeries();
+  log('Coin filter: now scanning ' + active.join(', '), 'b');
+}
+
+function setAllCoins(on) {
+  if (!S.cfg.coins) S.cfg.coins = {};
+  ['BTC','ETH','SOL','XRP','DOGE'].forEach(function(c) {
+    S.cfg.coins[c] = on;
+    var btn = document.getElementById('coin-' + c);
+    if (btn) { btn.classList.toggle('active', on); }
+  });
+  if (!on) { S.cfg.coins.BTC = true; document.getElementById('coin-BTC').classList.add('active'); }
+  updateCoinStatus();
+  log('Coin filter: ' + (on ? 'all coins' : 'BTC only (minimum)'), 'b');
+}
+
+function updateCoinStatus() {
+  var coins = S.cfg.coins || {};
+  var active = ['BTC','ETH','SOL','XRP','DOGE'].filter(function(c){ return coins[c] !== false; });
+  var el = document.getElementById('coinStatus');
+  if (el) el.textContent = 'Scanning: ' + (active.length ? active.join(' · ') : 'none');
+}
+
 function toggleCategory(cat, btn) {
   ENABLED_CATEGORIES[cat] = !ENABLED_CATEGORIES[cat];
   btn.textContent = ENABLED_CATEGORIES[cat] ? 'ENABLED' : 'DISABLED';
