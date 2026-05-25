@@ -5859,7 +5859,9 @@ function switchPanel(tab) {
     secEl.style.display = 'flex';
     secEl.style.flex = '1';
     secEl.style.minHeight = '0';
-    secEl.style.overflow = 'hidden';
+    // Scrollable tabs get overflow:auto, others hidden
+    var scrollTabs = ['settings', 'analytics', 'positions'];
+    secEl.style.overflow = scrollTabs.indexOf(tab) >= 0 ? 'auto' : 'hidden';
   }
   if (tab === 'signals') syncSignalListFull();
   if (tab === 'analytics') { updateAnalytics(); setTimeout(updateIndicatorCharts, 150); }
