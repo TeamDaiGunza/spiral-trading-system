@@ -1062,8 +1062,16 @@ MIIEowIBAAKCAQEA...
 
     <!-- Key metrics row -->
     <div class="metrics">
-      <div class="metric"><div class="metric-lbl" data-tip="Total value of your account including open positions">Portfolio</div><div class="metric-val" id="mPort">$0.00</div></div>
-      <div class="metric"><div class="metric-lbl" data-tip="Cash available to place new trades right now">Available</div><div class="metric-val" id="mCash">$0.00</div></div>
+      <div class="metric" style="position:relative">
+        <div class="metric-lbl" data-tip="Total value of your account including open positions">Portfolio</div>
+        <div class="metric-val" id="mPort">$0.00</div>
+        <div id="paperBadge" style="display:none;position:absolute;top:4px;right:6px;font-family:var(--display);font-size:7px;letter-spacing:0.15em;color:var(--gold);border:1px solid var(--gold);padding:1px 4px;border-radius:2px">PAPER</div>
+      </div>
+      <div class="metric" style="position:relative">
+        <div class="metric-lbl" data-tip="Cash available to place new trades right now">Available</div>
+        <div class="metric-val" id="mCash">$0.00</div>
+        <button id="fundPaperBtn" onclick="fundPaperBalance()" style="display:none;position:absolute;bottom:4px;right:6px;font-family:var(--display);font-size:7px;letter-spacing:0.1em;color:var(--gold);background:rgba(255,215,0,0.08);border:1px solid rgba(255,215,0,0.4);padding:2px 6px;border-radius:2px;cursor:pointer" title="Add $100 imaginary dollars to paper balance">+$100</button>
+      </div>
       <div class="metric"><div class="metric-lbl" data-tip="Dollar amount currently tied up in open positions">Exposure</div><div class="metric-val a" id="mExp">$0.00</div></div>
       <div class="metric"><div class="metric-lbl" data-tip="Profit or loss since you armed the bot this session">Session P&amp;L</div><div class="metric-val" id="mPnl">$0.00</div></div>
       <div class="metric"><div class="metric-lbl" data-tip="Percentage of trades that resolved in your favor this session">Win Rate</div><div class="metric-val" id="mWr">--</div></div>
@@ -1180,7 +1188,7 @@ MIIEowIBAAKCAQEA...
               <span id="obText">--</span>
             </div>
             <div class="signal-list" id="signalList" style="max-height:none;overflow-y:visible">
-              <div class="empty">ARM THE SYSTEM TO BEGIN</div>
+              <div class="empty" id="signalEmpty">ARM THE SYSTEM TO BEGIN</div>
             </div>
           </div>
         </div>
@@ -2169,6 +2177,8 @@ function callClaude(prompt) {
 
 function fetchBalance() {
   var cashBefore = S.cash;
+  // Don't fetch real balance while in paper mode — it would overwrite paper funds
+  if (S.paperMode) return Promise.resolve(PAPER_BALANCE);
   return apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/balance').then(function(d) {
     // Kalshi balance response fields:
     // balance: cents of available cash (what you can trade with)
@@ -2830,28 +2840,61 @@ function fetchMarkets() {
 }
 
 // ── Paper trading mode ────────────────────────────────────────────
+// Paper trading balance — completely separate from real balance
+var PAPER_BALANCE   = 0;
+var REAL_CASH_CACHE = 0; // stash real balance while in paper mode
+
+function fundPaperBalance() {
+  PAPER_BALANCE += 100;
+  S.cash     = PAPER_BALANCE;
+  S.portfolio = PAPER_BALANCE;
+  log('PAPER: +$100 added — simulated balance now $' + PAPER_BALANCE.toFixed(2), 'a');
+  updateMetrics();
+}
+
+function updatePaperUI(on) {
+  var badge   = document.getElementById('paperBadge');
+  var fundBtn = document.getElementById('fundPaperBtn');
+  if (badge)   badge.style.display   = on ? 'block' : 'none';
+  if (fundBtn) fundBtn.style.display = on ? 'block' : 'none';
+}
+
 function togglePaperMode() {
   S.paperMode = !S.paperMode;
   var btn = document.getElementById('paperBtn');
   if (btn) {
-    btn.textContent = 'PAPER: ' + (S.paperMode ? 'ON' : 'OFF');
-    btn.style.color = S.paperMode ? 'var(--gold)' : 'var(--tx3)';
+    btn.textContent = 'PAPER ' + (S.paperMode ? 'ON' : 'OFF');
+    btn.style.color       = S.paperMode ? 'var(--gold)' : 'var(--tx3)';
     btn.style.borderColor = S.paperMode ? 'var(--gold)' : 'var(--bd2)';
-    btn.style.background = S.paperMode ? 'rgba(255,215,0,0.08)' : 'transparent';
+    btn.style.background  = S.paperMode ? 'rgba(255,215,0,0.08)' : 'transparent';
   }
+
   if (S.paperMode) {
-    // set paper balance if no real balance
-    if (!S.cash || S.cash < 0.01) {
-      // Don't fake a balance — fetch the real one
-      log('Balance not yet loaded — fetching from Kalshi...', 'b');
-      fetchBalance();
-      return;
-    }
-    log('PAPER TRADING MODE ON — no real orders will be placed', 'a');
-    log('Simulated balance: $' + S.cash.toFixed(2), 'a');
+    // Stash real balance, set up paper balance
+    REAL_CASH_CACHE = S.cash;
+    PAPER_BALANCE   = 0; // start empty — user funds it themselves
+    S.cash          = 0;
+    S.portfolio     = 0;
+    S.startPortfolio = 0;
+    S.pnl           = 0;
+    pnlHistory      = [{ t: Date.now(), v: 0 }];
+    updatePaperUI(true);
+    log('PAPER MODE ON — no real orders will be placed', 'a');
+    log('Click +$100 next to your balance to fund the paper account', 'a');
     soundAlert();
+    updateMetrics();
   } else {
-    log('Paper mode OFF — live trading resumed', 'g');
+    // Wipe paper state, restore real balance
+    PAPER_BALANCE    = 0;
+    S.cash           = REAL_CASH_CACHE;
+    S.portfolio      = REAL_CASH_CACHE;
+    S.startPortfolio = 0; // will reset on next fetchBalance
+    S.pnl            = 0;
+    pnlHistory       = [{ t: Date.now(), v: 0 }];
+    updatePaperUI(false);
+    log('Paper mode OFF — live trading resumed. Fetching real balance...', 'g');
+    fetchBalance(); // restore real numbers from Kalshi
+    updateMetrics();
   }
 }
 
@@ -3519,11 +3562,11 @@ function drawPredictionChart() {
   var c = document.getElementById('predCalled');
   var h = document.getElementById('predHit');
   var a = document.getElementById('predAccuracy');
-  if (c) c.textContent = (called || settled.length) + (pending.length > 0 ? ' (+' + pending.length + ')' : '');
-  if (h) h.textContent = hits;
+  if (c) c.textContent = !S.armed ? '—' : (called || settled.length) + (pending.length > 0 ? ' (+' + pending.length + ')' : '');
+  if (h) h.textContent = !S.armed ? '—' : hits;
   if (a) {
-    a.textContent = acc !== null ? acc + '%' : '--%';
-    a.style.color = acc === null ? 'var(--tx3)' : acc >= 60 ? 'var(--orange2)' : acc >= 50 ? 'var(--gold)' : 'var(--red2)';
+    a.textContent = !S.armed ? '—' : acc !== null ? acc + '%' : 'WAITING';
+    a.style.color = !S.armed ? 'var(--tx3)' : acc === null ? 'var(--tx3)' : acc >= 60 ? 'var(--orange2)' : acc >= 50 ? 'var(--gold)' : 'var(--red2)';
   }
 
   // Draw even with no data — show axes and pending trades
@@ -3535,10 +3578,22 @@ function drawPredictionChart() {
     ctx.fillStyle = 'rgba(255,255,255,0.12)';
     ctx.font = '10px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('No trades yet — arm the system to begin', W/2, H/2 - 10);
-    ctx.font = '9px monospace';
-    ctx.fillStyle = 'rgba(255,85,0,0.4)';
-    ctx.fillText('Chart updates as trades settle', W/2, H/2 + 10);
+    if (!S.connected) {
+      ctx.fillText('Connect credentials to begin', W/2, H/2);
+    } else if (!S.armed) {
+      ctx.fillText('Arm the system to begin tracking', W/2, H/2);
+    } else {
+      ctx.fillStyle = 'rgba(255,85,0,0.5)';
+      ctx.fillText('ARMED — scanning for trades...', W/2, H/2 - 10);
+      ctx.font = '9px monospace';
+      ctx.fillStyle = 'rgba(255,255,255,0.2)';
+      ctx.fillText('Chart populates as trades are placed and settled', W/2, H/2 + 10);
+      // Draw a pulsing dot to show it's live
+      ctx.beginPath();
+      ctx.arc(W/2, H/2 + 35, 4, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,85,0,' + (0.4 + 0.3 * Math.sin(Date.now()/500)) + ')';
+      ctx.fill();
+    }
     return;
   }
 
@@ -4615,10 +4670,14 @@ function settlePosition(pos, won, payoutDollars) {
   S.history.push(pos);
   if (S.history.length > 50) S.history.shift();
   if (won) {
-    soundWin(); showResultPanel(true);
+    soundWin();
+    // Always show in-app panel — works minimized with backgroundThrottling:false
+    showResultPanel(true);
+    // System notification for when truly away
     sysNotify('🟠 VICTORY — The Spiral', pos.dir.toUpperCase() + ' ' + pos.mkt + ' | +$' + pnl.toFixed(2), 'normal');
   } else {
-    soundLoss(); showResultPanel(false);
+    soundLoss();
+    showResultPanel(false);
     sysNotify('💀 DEFEAT — The Spiral', pos.dir.toUpperCase() + ' ' + pos.mkt + ' | -$' + Math.abs(pnl).toFixed(2), 'low');
   }
   // Push real P&L (balance diff) not stale accumulated S.pnl
@@ -6662,6 +6721,37 @@ function updateModuleStates() {
     var armMsg2 = document.getElementById('armMsg');
     if (armMsg2) armMsg2.style.display = 'none';
     document.querySelectorAll('.kelly-line').forEach(function(el) { el.style.opacity = '1'; });
+  }
+
+  // Signal list empty message
+  var sigEmpty = document.getElementById('signalEmpty');
+  if (sigEmpty) {
+    if (!connected) {
+      sigEmpty.textContent = 'CONNECT CREDENTIALS TO BEGIN';
+    } else if (!armed) {
+      sigEmpty.textContent = 'ARM THE SYSTEM TO BEGIN';
+    } else {
+      sigEmpty.textContent = 'ARMED — SCANNING MARKETS...';
+      sigEmpty.style.color = 'var(--orange)';
+    }
+  }
+
+  // Kelly box — show armed waiting state
+  var kb = document.querySelector('.kelly-box');
+  if (kb && armed && !kb.querySelector('.kelly-line')) {
+    // Armed but no signal yet — show waiting message
+    var waiting = document.getElementById('kellyWaiting');
+    if (!waiting) {
+      waiting = document.createElement('div');
+      waiting.id = 'kellyWaiting';
+      waiting.style.cssText = 'text-align:center;padding:16px;font-family:var(--mono);font-size:9px;color:var(--tx3);letter-spacing:0.15em';
+      waiting.innerHTML = '<span style="color:var(--orange)">●</span> ARMED — AWAITING FIRST SCAN CYCLE...';
+      kb.appendChild(waiting);
+    }
+    waiting.style.display = 'block';
+  } else {
+    var kw = document.getElementById('kellyWaiting');
+    if (kw) kw.style.display = 'none';
   }
 
   // Indicator labels — show "waiting for data" when not armed

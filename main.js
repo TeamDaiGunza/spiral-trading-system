@@ -329,6 +329,7 @@ function createWindow() {
       contextIsolation: true,
       autoplayPolicy: 'no-user-gesture-required',
       preload: path.join(ASSET_ROOT, 'preload.js'),
+      backgroundThrottling: false, // keep timers/animations running when minimized
     },
     icon: path.join(__dirname, 'icon.png'),
     show: false, // don't flash white before load
