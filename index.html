@@ -4849,43 +4849,37 @@ function pollMarketResult(pos, attempts) {
     var won = (pos.dir === result);
     log('Market resolved: ' + result.toUpperCase() + ' | our bet: ' + pos.dir.toUpperCase() + ' → ' + (won ? 'WIN' : 'LOSS'), won ? 'g' : 'r');
 
-    // Step 3: Capture balance BEFORE payout, wait for Kalshi to process, then compare
-    var snapBefore = S.cash; // snapshot right now before any fetch
-    log('Balance snapshot: $' + snapBefore.toFixed(2) + ' | waiting 6s for Kalshi payout...', 'b');
+    // Step 3: Determine win/loss purely from market result (already confirmed above)
+    // Do NOT use balance delta for win/loss determination — too unreliable
+    // Balance delta is only used to get the real payout amount on wins
 
-    setTimeout(function() {
-      fetchBalance().then(function() {
-        var snapAfter = S.cash;
-        var delta = snapAfter - snapBefore;
+    if (!won) {
+      // LOSS: straightforward — you lose the stake, no payout
+      log('LOSS: -$' + pos.stake.toFixed(2) + ' | market resolved ' + result.toUpperCase() + ', we bet ' + pos.dir.toUpperCase(), 'r');
+      settlePosition(pos, false, -pos.stake);
+    } else {
+      // WIN: calculate payout from contracts and entry price — no balance delta guessing
+      var entryCents = pos.entryPriceCents || Math.round((pos.stake / Math.max(1, pos.contracts||1)) * 100);
+      var grossPayout = (pos.contracts||1) * 1.00 * 0.99; // contracts × $1 × (1-fee)
+      var netPnl = grossPayout - pos.stake;
 
-        log('Balance: $' + snapBefore.toFixed(2) + ' → $' + snapAfter.toFixed(2) + ' (Δ$' + delta.toFixed(2) + ')', 'b');
+      // Sanity check: net P&L must be positive for a win, and less than max possible
+      var maxNet = (pos.contracts||1) * 0.99;
+      if (netPnl > maxNet) netPnl = maxNet;
+      if (netPnl < 0) netPnl = 0; // shouldn't happen but safety net
 
-        if (won && delta > 0.01) {
-          // Real payout confirmed — P&L = what we got back minus what we put in
-          var netPnl = delta - 0; // delta already IS net (Kalshi paid us and deducted stake)
-          // But delta = payout - nothing (stake was already deducted when order placed)
-          // So actual net P&L = delta (what came in) - stake (already gone) 
-          // Wait — stake was deducted at order time, so delta = gross payout
-          // Net P&L = gross payout - stake
-          var pnl = delta - pos.stake;
-          log('WIN CONFIRMED: received $' + delta.toFixed(2) + ' gross | net P&L $' + pnl.toFixed(2), 'g');
-          settlePosition(pos, true, pnl);
-        } else if (won && delta <= 0.01 && attempts < 6) {
-          log('Payout not yet received ($' + delta.toFixed(2) + ' change) — retrying in 8s', 'a');
-          setTimeout(function() { pollMarketResult(pos, attempts + 1); }, 8000);
-        } else if (won) {
-          // Max retries — settle as win with Kalshi math estimate
-          var entryCents = pos.entryPriceCents || Math.round((pos.stake / Math.max(1, pos.contracts||1)) * 100);
-          var estimatedPnl = (pos.contracts||1) * (1 - entryCents/100) * 0.99 - pos.stake;
-          log('WIN settled with estimate (payout delayed): net $' + estimatedPnl.toFixed(2), 'a');
-          settlePosition(pos, true, Math.max(0, estimatedPnl));
-        } else {
-          // Loss — you lose the stake, period
-          log('LOSS confirmed — $' + pos.stake.toFixed(2) + ' lost', 'r');
-          settlePosition(pos, false, -pos.stake); // always negative stake on loss
-        }
-      });
-    }, 6000);
+      log('WIN: +$' + netPnl.toFixed(2) + ' | ' + (pos.contracts||1) + ' contracts @ ' + entryCents + 'c → payout $' + grossPayout.toFixed(2), 'g');
+      settlePosition(pos, true, netPnl);
+
+      // Then verify with real balance after payout (2s delay) — just for logging
+      setTimeout(function() {
+        var cashBefore = S.cash;
+        fetchBalance().then(function() {
+          var delta = S.cash - cashBefore;
+          log('Balance check post-win: Δ$' + delta.toFixed(2) + ' (expected ~$' + grossPayout.toFixed(2) + ')', delta > 0 ? 'g' : 'b');
+        });
+      }, 3000);
+    }
 
   }).catch(function(e) {
     log('Market poll error: ' + e.message + ' — retrying', 'a');
