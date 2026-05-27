@@ -3274,28 +3274,34 @@ function runCycle() {
         // Trend alignment: don't fight strong 24h momentum on 15-min markets
         if (is15m && liveData) {
           var chg24 = liveData.change24h;
-          if (chg24 > 3 && qEdge.direction === 'no') {
-            log('TREND BLOCK: ' + asset + ' +' + chg24.toFixed(1) + '% today — not betting NO on 15m up/down', 'a');
-            addSignal('skip', mktTitle.substring(0,28), 0, 'fighting strong uptrend', 50, mkt.ticker);
+          // Adaptive trend filter — hard block only on extreme trends (>6%)
+          // Moderate trends (3-6%) require higher consensus instead of full block
+          if (chg24 > 6 && qEdge.direction === 'no') {
+            log('TREND BLOCK: ' + asset + ' +' + chg24.toFixed(1) + '% — extreme uptrend, skipping NO', 'a');
+            addSignal('skip', mktTitle.substring(0,28), 0, 'extreme uptrend', 50, mkt.ticker);
             updateAll(); return;
           }
-          if (chg24 < -3 && qEdge.direction === 'yes') {
-            log('TREND BLOCK: ' + asset + ' ' + chg24.toFixed(1) + '% today — not betting YES against downtrend', 'a');
-            addSignal('skip', mktTitle.substring(0,28), 0, 'fighting strong downtrend', 50, mkt.ticker);
+          if (chg24 < -6 && qEdge.direction === 'yes') {
+            log('TREND BLOCK: ' + asset + ' ' + chg24.toFixed(1) + '% — extreme downtrend, skipping YES', 'a');
+            addSignal('skip', mktTitle.substring(0,28), 0, 'extreme downtrend', 50, mkt.ticker);
             updateAll(); return;
           }
+          // Moderate trend — requires extra consensus signal (4 instead of 3)
+          var trendPenalty = (Math.abs(chg24) > 3) ? 1 : 0;
 
           // 5-min velocity reality check — tightened thresholds
           var vel5 = getPriceVelocity(assetCode);
           if (vel5 !== null) {
-            if (vel5 < -0.2 && qEdge.direction === 'yes') {
+            // Velocity block: only hard-block on strong moves (0.4%+)
+          // Weaker moves are handled by the velocity signal vote inside calcQuantEdge
+          if (vel5 < -0.4 && qEdge.direction === 'yes') {
               log('VELOCITY BLOCK: ' + asset + ' falling ' + vel5.toFixed(2) + '% in 5m — not betting YES', 'a');
-              addSignal('skip', mktTitle.substring(0,28), 0, 'price falling 5m', 50, mkt.ticker);
+              addSignal('skip', mktTitle.substring(0,28), 0, 'price falling fast', 50, mkt.ticker);
               updateAll(); return;
             }
-            if (vel5 > 0.2 && qEdge.direction === 'no') {
+            if (vel5 > 0.4 && qEdge.direction === 'no') {
               log('VELOCITY BLOCK: ' + asset + ' rising +' + vel5.toFixed(2) + '% in 5m — not betting NO', 'a');
-              addSignal('skip', mktTitle.substring(0,28), 0, 'price rising 5m', 50, mkt.ticker);
+              addSignal('skip', mktTitle.substring(0,28), 0, 'price rising fast', 50, mkt.ticker);
               updateAll(); return;
             }
           }
@@ -3730,6 +3736,43 @@ function drawPredictionChart() {
   ctx.fillText('loss', W - 44, 11);
 }
 
+// ── Market regime detector ────────────────────────────────────────
+// Detects if market is trending, ranging, or choppy and adjusts behaviour
+var MARKET_REGIME = 'unknown'; // 'trending', 'ranging', 'choppy'
+
+function detectMarketRegime() {
+  var btcHist = PRICE_HISTORY['BTC'] || [];
+  if (btcHist.length < 12) return 'unknown';
+
+  var prices = btcHist.slice(-12).map(function(h){ return h.p; });
+  var changes = [];
+  for (var i = 1; i < prices.length; i++) {
+    changes.push((prices[i] - prices[i-1]) / prices[i-1] * 100);
+  }
+
+  // Direction consistency — how often are consecutive moves same direction?
+  var sameDir = 0;
+  for (var i = 1; i < changes.length; i++) {
+    if ((changes[i] > 0) === (changes[i-1] > 0)) sameDir++;
+  }
+  var consistency = sameDir / (changes.length - 1);
+
+  // Volatility — average absolute change
+  var avgAbsChange = changes.reduce(function(s,c){ return s+Math.abs(c); }, 0) / changes.length;
+
+  if (consistency > 0.7 && avgAbsChange > 0.05) {
+    MARKET_REGIME = 'trending';
+  } else if (avgAbsChange < 0.02) {
+    MARKET_REGIME = 'ranging';
+  } else {
+    MARKET_REGIME = 'choppy';
+  }
+  return MARKET_REGIME;
+}
+
+// Call every 5 minutes
+setInterval(detectMarketRegime, 5 * 60 * 1000);
+
 var PATTERN_STATS = {}; // key = "series:direction" -> {wins, losses, lastUpdate}
 var PATTERN_RESET_MS = 2 * 60 * 60 * 1000; // reset after 2 hours of no activity
 
@@ -4137,12 +4180,12 @@ function calcQuantEdge(mkt, prices, ob, recentTrades, fills, timing, strikeInfo)
   if (ob && ob.yesBidDepth && ob.noBidDepth) {
     var imb = ob.yesBidDepth / Math.max(0.1, ob.noBidDepth);
     // Raised thresholds — only meaningful imbalances count as signal votes
-    if (imb > 4.0)       { votes.ob =  1; strengths.ob = 0.20; signals.push('OB: ' + imb.toFixed(1) + 'x YES STRONG'); }
-    else if (imb > 2.5)  { votes.ob =  1; strengths.ob = 0.12; signals.push('OB: ' + imb.toFixed(1) + 'x YES'); }
-    else if (imb > 1.6)  { votes.ob =  1; strengths.ob = 0.05; signals.push('OB: mild YES (no vote)'); votes.ob = 0; } // note: mild doesn't vote
-    else if (imb < 0.25) { votes.ob = -1; strengths.ob = 0.20; signals.push('OB: ' + (1/imb).toFixed(1) + 'x NO STRONG'); }
-    else if (imb < 0.40) { votes.ob = -1; strengths.ob = 0.12; signals.push('OB: ' + (1/imb).toFixed(1) + 'x NO'); }
-    else if (imb < 0.62) { votes.ob = -1; strengths.ob = 0.05; signals.push('OB: mild NO (no vote)'); votes.ob = 0; } // note: mild doesn't vote
+    if (imb > 3.5)       { votes.ob =  1; strengths.ob = 0.20; signals.push('OB: ' + imb.toFixed(1) + 'x YES STRONG'); }
+    else if (imb > 2.0)  { votes.ob =  1; strengths.ob = 0.12; signals.push('OB: ' + imb.toFixed(1) + 'x YES'); }
+    else if (imb > 1.4)  { votes.ob =  1; strengths.ob = 0.05; signals.push('OB: mild YES'); } // mild counts as weak vote
+    else if (imb < 0.28) { votes.ob = -1; strengths.ob = 0.20; signals.push('OB: ' + (1/imb).toFixed(1) + 'x NO STRONG'); }
+    else if (imb < 0.50) { votes.ob = -1; strengths.ob = 0.12; signals.push('OB: ' + (1/imb).toFixed(1) + 'x NO'); }
+    else if (imb < 0.71) { votes.ob = -1; strengths.ob = 0.05; signals.push('OB: mild NO'); }
     else { votes.ob = 0; signals.push('OB: balanced'); }
   } else { signals.push('OB: no data'); }
 
@@ -4155,11 +4198,10 @@ function calcQuantEdge(mkt, prices, ob, recentTrades, fills, timing, strikeInfo)
       if (t.taker_side === 'yes') yesBuys += c;
     });
     var yesPct = total > 0 ? yesBuys / total : 0.5;
-    // Raised thresholds — need clearer conviction in flow
-    if (yesPct > 0.82)      { votes.flow =  1; strengths.flow = 0.12; signals.push('Flow: ' + (yesPct*100).toFixed(0) + '% YES strong'); }
-    else if (yesPct > 0.70) { votes.flow =  1; strengths.flow = 0.06; signals.push('Flow: YES bias'); }
-    else if (yesPct < 0.18) { votes.flow = -1; strengths.flow = 0.12; signals.push('Flow: ' + ((1-yesPct)*100).toFixed(0) + '% NO strong'); }
-    else if (yesPct < 0.30) { votes.flow = -1; strengths.flow = 0.06; signals.push('Flow: NO bias'); }
+    if (yesPct > 0.75)      { votes.flow =  1; strengths.flow = 0.12; signals.push('Flow: ' + (yesPct*100).toFixed(0) + '% YES'); }
+    else if (yesPct > 0.62) { votes.flow =  1; strengths.flow = 0.06; signals.push('Flow: YES bias'); }
+    else if (yesPct < 0.25) { votes.flow = -1; strengths.flow = 0.12; signals.push('Flow: ' + ((1-yesPct)*100).toFixed(0) + '% NO'); }
+    else if (yesPct < 0.38) { votes.flow = -1; strengths.flow = 0.06; signals.push('Flow: NO bias'); }
     else { votes.flow = 0; signals.push('Flow: neutral'); }
   } else { signals.push('Flow: insufficient data (<5 trades)'); }
 
@@ -4324,12 +4366,12 @@ function calcQuantEdge(mkt, prices, ob, recentTrades, fills, timing, strikeInfo)
   var yesEdge  = voteKeys.filter(function(k){ return votes[k] ===  1; }).reduce(function(s,k){ return s+(strengths[k]||0); }, 0);
   var noEdge   = voteKeys.filter(function(k){ return votes[k] === -1; }).reduce(function(s,k){ return s+(strengths[k]||0); }, 0);
 
-  // Require minimum 3 signals agreeing — raised from 2 to cut pipe-dream trades
-  // Exception: 2 signals + very strong orderbook (3x+ imbalance)
-  var hasConsensus = yesVotes >= 3 || noVotes >= 3
+  // Consensus: 2 signals normally, 3 if fighting a moderate trend
+  var minVotes = 2 + (typeof trendPenalty !== 'undefined' ? trendPenalty : 0);
+  var hasConsensus = yesVotes >= minVotes || noVotes >= minVotes
     || (yesVotes >= 2 && strengths.ob >= 0.18 && votes.ob ===  1)
     || (noVotes  >= 2 && strengths.ob >= 0.18 && votes.ob === -1)
-    || (votes.ext !== 0 && strengths.ext >= 0.15 && yesVotes >= 2)   // extreme price needs 2 other signals
+    || (votes.ext !== 0 && strengths.ext >= 0.15 && yesVotes >= 2)
     || (votes.ext !== 0 && strengths.ext >= 0.15 && noVotes  >= 2);
 
   // Spread cost penalty — must overcome spread to profit
@@ -4420,7 +4462,8 @@ function getStrategyPrompt(asset, interval, mkt, yesPrice, vol, priceCtx, strike
 
   base += '\n=== YOUR TASK ===\n'
     + 'IMPORTANT CALIBRATION RULES:\n'
-    + '0. REALITY CHECK FIRST: Read the market question carefully. Does the math work? '
+    + '0. MARKET REGIME: Current detected regime is ' + (MARKET_REGIME || 'unknown') + '. '
+    + 'Trending = follow momentum. Ranging = fade extremes. Choppy = require stronger signals, be selective. '
     + 'If ETH is at $2,400 and this market asks "ETH above $1,239 in 15 min" — that YES is already true, '
     + 'but if it asks "ETH BELOW $1,239" when ETH is at $2,400 — that requires a 50% crash in 15 minutes. Skip immediately.\n'
     + '1. The market YES price (' + yesPrice + 'c) reflects current consensus. You need EXTRA edge beyond this.\n'
