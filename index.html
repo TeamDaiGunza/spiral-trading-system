@@ -1671,6 +1671,7 @@ function recheckMarket(ticker, mktLabel) {
 
 function runSingleMarketCheck(mkt, prices) {
   if (!mkt || !mkt.ticker) { log('RECHECK: invalid market data', 'r'); return; }
+  var trendPenalty = 0; // no trend penalty context in manual recheck
   var mktTitle = ('[' + (mkt._label || mkt._series || mkt.ticker) + '] ' + (mkt.subtitle || mkt.title || mkt.ticker)).substring(0, 44);
   log('RECHECK [' + mkt.ticker + ']: fetching signals...', 'b');
 
@@ -2095,17 +2096,22 @@ function checkCircuitBreakers() {
   return true;
 }
 
-// Rate limiter — min 300ms between Kalshi API calls, 5s backoff on 429
-var _lastApiCall = 0;
+// Rate limiter — only applies to Kalshi API calls, not Claude or other endpoints
+var _lastKalshiCall = 0;
 function apiFetch(url, opts) {
+  // Only rate-limit Kalshi endpoints — Claude and other calls go through immediately
+  var isKalshi = url && url.indexOf('/kalshi/') >= 0;
+  if (!isKalshi) {
+    return fetch(url, opts || {}).then(function(r) { return r.json(); });
+  }
   var now = Date.now();
-  var wait = Math.max(0, 250 - (now - _lastApiCall));
-  _lastApiCall = now + wait;
+  var wait = Math.max(0, 250 - (now - _lastKalshiCall));
+  _lastKalshiCall = now + wait;
   return new Promise(function(res) { setTimeout(res, wait); }).then(function() {
     return fetch(url, opts || {}).then(function(r) {
       if (r.status === 429) {
         log('Rate limited by Kalshi — backing off 5s', 'a');
-        _lastApiCall = Date.now() + 5000;
+        _lastKalshiCall = Date.now() + 5000;
         return new Promise(function(res) { setTimeout(res, 5000); })
           .then(function() { return fetch(url, opts || {}).then(function(r2) { return r2.json(); }); });
       }
@@ -2906,8 +2912,12 @@ function togglePaperMode() {
   }
 
   if (S.paperMode) {
-    // Stash real balance, set up paper balance
-    REAL_CASH_CACHE = S.cash;
+    // Stash real balance — only if we actually have one loaded
+    if (S.cash > 0.01) {
+      REAL_CASH_CACHE = S.cash;
+    } else {
+      log('Paper mode: real balance not loaded yet — connect first for safe toggle', 'a');
+    }
     PAPER_BALANCE   = 0; // start empty — user funds it themselves
     S.cash          = 0;
     S.portfolio     = 0;
@@ -5446,6 +5456,7 @@ function arm() {
   soundArm();
   sysNotify('⚡ SPIRAL DRIVE ENGAGED', 'Autonomous trading active | Balance: $' + S.cash.toFixed(2));
   log('Spiral drive engaged - autonomous trading active', 'g');
+  detectMarketRegime(); // detect regime immediately on arm
   log('All profitability systems online', 'g');
   // rediscover API endpoints every arm in case Kalshi updated
   KALSHI_ENDPOINT_CHECKED = false;
