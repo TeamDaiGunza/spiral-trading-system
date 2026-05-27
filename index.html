@@ -4667,6 +4667,8 @@ function closePosition(pos, currentPriceCents) {
       type:             'limit',
       count:            contractCount,
       yes_price:        closeYesPrice,
+      reduce_only:      true,          // critical: nets against existing position, doesn't open new one
+      time_in_force:    'fill_or_kill', // fill immediately or cancel — no hanging limit orders
       client_order_id:  'close-' + pos.id + '-' + Date.now()
     })
   }).then(function(d) {
