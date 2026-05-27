@@ -1775,9 +1775,9 @@ function updateMetrics() {
   if (pEl) {
     // Always compute from real balance diff — never trust local accumulation
     // Always cash vs starting cash — clean and consistent
-    var realPnl = (S.startPortfolio > 0 && S.cash > 0)
+    var realPnl = (S.startPortfolio > 0 && S.cash > 0 && balanceReadings >= 2)
       ? (S.cash - S.startPortfolio)
-      : (S.pnl || 0);
+      : 0;
     S.pnl = realPnl;
     var safePnl = isNaN(realPnl) ? 0 : realPnl;
     pEl.textContent = (safePnl >= 0 ? '+$' : '-$') + Math.abs(safePnl).toFixed(2);
@@ -2239,9 +2239,12 @@ function fetchBalance() {
 
     if (S.cash >= 0) {
       S.portfolio = S.cash + positionValue;
-      if (!S.startPortfolio) {
+      if (!S.startPortfolio && balanceReadings >= 2) {
+        // Wait for 2 readings to smooth out Kalshi's initial balance noise
         S.startPortfolio = S.cash;
-        log('Session start: cash=$' + S.cash.toFixed(2) + ' (baseline set, excluding $' + positionValue.toFixed(2) + ' open positions)', 'b');
+        log('Session baseline locked: $' + S.cash.toFixed(2) + ' (reading #' + balanceReadings + ')', 'b');
+      } else if (!S.startPortfolio) {
+        log('Balance reading ' + (balanceReadings+1) + '/2 — waiting to lock baseline...', 'b');
       }
       if (!PROTECTED_PRINCIPAL) PROTECTED_PRINCIPAL = S.cash;
       // P&L = current cash vs starting cash — only real Kalshi balance
@@ -2755,9 +2758,10 @@ setInterval(function() {
 
 function fetchPortfolioFill(orderId) {
   if (!orderId) return Promise.resolve(null);
-  return apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/fills?order_id=' + orderId)
+  // Try fills with order filter, fall back to recent fills scan
+  return apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/fills?order_id=' + orderId + '&limit=10')
     .then(function(d) {
-      if (d.error || d.detail) return null; // 404 or not found
+      if (!d || d.error || d.detail || d.code === 'not_found') return null; // 404 or not found
       var fills = d.fills || d.results || [];
       if (!fills.length) return null;
       // Sum up all fills for this order
@@ -4573,6 +4577,27 @@ function startMomentumWatch(pos, entryPrice) {
         + ' ($' + (parseFloat(unrealDollar) >= 0 ? '+' : '') + unrealDollar + ')'
         + ' | trend:' + trend + ' | ' + timeLeft + 's left', 'b');
 
+      // Hard stop-loss: if value has dropped >60% from entry AND we're losing money, exit immediately
+      var lossFromEntry = ((currentVal - entryPrice) / Math.max(1, entryPrice) * 100);
+      if (lossFromEntry < -60 && currentVal > 3) {
+        log('HARD STOP-LOSS: ' + pos.mkt + ' dropped ' + lossFromEntry.toFixed(0) + '% from entry — exiting immediately', 'r');
+        clearInterval(momentumWatchers[pos.id]);
+        delete momentumWatchers[pos.id];
+        soundExit();
+        closePosition(pos, currentVal);
+        return;
+      }
+
+      // Near expiry hard exit: if <90s left and we're in profit, lock it
+      if (timeLeft < 90 && timeLeft > 10 && parseFloat(unrealDollar) > 0.05 && currentVal > 5) {
+        log('NEAR EXPIRY PROFIT LOCK: ' + pos.mkt + ' | ' + timeLeft + 's left | +$' + unrealDollar + ' — exiting', 'g');
+        clearInterval(momentumWatchers[pos.id]);
+        delete momentumWatchers[pos.id];
+        soundExit();
+        closePosition(pos, currentVal);
+        return;
+      }
+
       var prompt = 'You are managing an open Kalshi prediction market position. Exit or hold?\n'
         + 'Position: ' + pos.dir.toUpperCase() + ' on "' + pos.mkt + '"\n'
         + 'Entry: ' + entryPrice + 'c | Current: ' + currentVal + 'c | Spread: ' + spread + 'c\n'
@@ -4602,7 +4627,7 @@ function startMomentumWatch(pos, entryPrice) {
         }
       }).catch(function(){});
     }).catch(function(){});
-  }, 60000);
+  }, 30000); // check every 30s for 15m markets
 }
 
 function closePosition(pos, currentPriceCents) {
@@ -4621,46 +4646,51 @@ function closePosition(pos, currentPriceCents) {
     log('Position already settled — skipping close', 'b');
     return;
   }
-  log('Closing position: ' + pos.ticker + ' | ' + pos.dir + ' x' + pos.contracts + ' @ ' + currentPriceCents + 'c', 'b');
+  // To close a YES position: sell YES = buy NO at (100 - currentPrice)
+  // To close a NO position: sell NO = buy YES at currentPrice  
+  // Kalshi always uses action:'buy' — you buy the opposite side to close
+  var closeSide     = pos.dir === 'yes' ? 'no' : 'yes';
+  var closeYesPrice = pos.dir === 'yes'
+    ? (100 - currentPriceCents)   // closing YES: buy NO at inverse price
+    : currentPriceCents;          // closing NO: buy YES at current price
+  var contractCount = pos.contracts || Math.round(pos.stake / (Math.max(1, pos.entryPriceCents || 50) / 100));
+
+  log('Closing: ' + pos.ticker + ' | buying ' + closeSide.toUpperCase() + ' x' + contractCount + ' @ ' + closeYesPrice + 'c (yes_price) to close ' + pos.dir.toUpperCase() + ' position', 'b');
+
   apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/orders', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      ticker: pos.ticker,
-      action: 'sell',
-      side: pos.dir,
-      type: 'limit',
-      count: pos.contracts,
-      yes_price: pos.dir === 'yes' ? currentPriceCents : (100 - currentPriceCents),
-      client_order_id: Math.random().toString(36).slice(2)
+      ticker:           pos.ticker,
+      action:           'buy',
+      side:             closeSide,
+      type:             'limit',
+      count:            contractCount,
+      yes_price:        closeYesPrice,
+      client_order_id:  'close-' + pos.id + '-' + Date.now()
     })
   }).then(function(d) {
+    log('Close API response: ' + JSON.stringify(d).substring(0, 120), 'b');
     if (d && d.error) {
       log('Close rejected: ' + JSON.stringify(d.error).substring(0, 80), 'r');
-      // if market not found, position has already settled — poll for result
-      if (d.error.code === 'MARKET_NOT_FOUND' || d.error.code === 'market_not_found') {
-        log('Market already closed — polling for settlement result', 'b');
+      if (d.error.code === 'MARKET_NOT_FOUND' || d.error.code === 'market_not_found'
+       || d.error.code === 'not_found' || (d.error.message || '').includes('not found')) {
+        log('Market closed — polling for settlement', 'b');
         pollMarketResult(pos, 0);
       }
       return;
     }
-    if (d.order || d.order_id || (d && !d.error)) {
-      // ── Correct early-exit P&L math ──────────────────────────────
-      // Entry cost: what we actually paid per contract
-      var entryCents = pos.entryPriceCents || Math.round((pos.stake / Math.max(1, pos.contracts)) * 100);
-      // Exit proceeds: sell_price × contracts (Kalshi takes fee on proceeds)
+    if (d.order || d.order_id || (d && !d.error && !d.detail)) {
+      var entryCents   = pos.entryPriceCents || Math.round((pos.stake / Math.max(1, pos.contracts)) * 100);
       var exitProceeds = (currentPriceCents / 100) * pos.contracts;
-      var exitFee      = exitProceeds * 0.01;
-      var netProceeds  = exitProceeds - exitFee;
-      // Net P&L = what we got back - what we put in
-      var netPnl = netProceeds - pos.stake;
-      var won    = netPnl > 0;
-      log('Early exit: entry ' + entryCents + 'c → exit ' + currentPriceCents + 'c | P&L: $' + netPnl.toFixed(2), won ? 'g' : 'r');
-      settlePosition(pos, won, netProceeds);
+      var netPnl       = exitProceeds * 0.99 - pos.stake;
+      var won          = netPnl > 0;
+      log('Early exit confirmed: entry ' + entryCents + 'c → exit ' + currentPriceCents + 'c | P&L: $' + netPnl.toFixed(2), won ? 'g' : 'r');
+      settlePosition(pos, won, netPnl);
     } else {
-      log('Close order rejected: ' + JSON.stringify(d).substring(0,80), 'r');
-      // Fall back: poll for natural settlement
-      pollMarketResult(pos, 0);
+      log('Close order rejected: ' + JSON.stringify(d).substring(0,80) + ' — polling for natural settlement', 'r');
+      // Don't give up — poll the market for natural settlement
+      if (!pos._settled) pollMarketResult(pos, 0);
     }
   }).catch(function(e) { log('Close error: ' + e.message, 'r'); });
 }
@@ -5454,9 +5484,13 @@ function arm() {
   document.getElementById('armBtn').className = 'arm-btn armed';
   document.getElementById('mainDot').classList.add('live');
   soundArm();
+  // Reset session baseline on each ARM so P&L is always for THIS session
+  S.startPortfolio = 0;
+  S.pnl = 0;
+  pnlHistory = [{ t: Date.now(), v: 0 }];
   sysNotify('⚡ SPIRAL DRIVE ENGAGED', 'Autonomous trading active | Balance: $' + S.cash.toFixed(2));
   log('Spiral drive engaged - autonomous trading active', 'g');
-  detectMarketRegime(); // detect regime immediately on arm
+  detectMarketRegime();
   log('All profitability systems online', 'g');
   // rediscover API endpoints every arm in case Kalshi updated
   KALSHI_ENDPOINT_CHECKED = false;
