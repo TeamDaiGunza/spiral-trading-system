@@ -2095,9 +2095,25 @@ function checkCircuitBreakers() {
   return true;
 }
 
+// Rate limiter — min 300ms between Kalshi API calls, 5s backoff on 429
+var _lastApiCall = 0;
 function apiFetch(url, opts) {
-  return fetch(url, opts).then(function(r) { return r.json(); });
+  var now = Date.now();
+  var wait = Math.max(0, 250 - (now - _lastApiCall));
+  _lastApiCall = now + wait;
+  return new Promise(function(res) { setTimeout(res, wait); }).then(function() {
+    return fetch(url, opts || {}).then(function(r) {
+      if (r.status === 429) {
+        log('Rate limited by Kalshi — backing off 5s', 'a');
+        _lastApiCall = Date.now() + 5000;
+        return new Promise(function(res) { setTimeout(res, 5000); })
+          .then(function() { return fetch(url, opts || {}).then(function(r2) { return r2.json(); }); });
+      }
+      return r.json();
+    });
+  });
 }
+
 
 // ── Dual-confirmation signal (two independent calls, must agree) ───
 function callClaudeDual(prompt1, prompt2) {
@@ -2732,8 +2748,10 @@ setInterval(function() {
 }, 60000);
 
 function fetchPortfolioFill(orderId) {
+  if (!orderId) return Promise.resolve(null);
   return apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/fills?order_id=' + orderId)
     .then(function(d) {
+      if (d.error || d.detail) return null; // 404 or not found
       var fills = d.fills || d.results || [];
       if (!fills.length) return null;
       // Sum up all fills for this order
@@ -2774,6 +2792,7 @@ function fetchFills(ticker) {
 }
 
 function fetchOrderbook(ticker) {
+  if (!ticker) return Promise.resolve(null);
   return apiFetch(PROXY + '/kalshi/trade-api/v2/markets/' + ticker + '/orderbook').then(function(d) {
     var ob = d.orderbook || d;
     if (!ob || (!ob.yes && !ob.no)) return null;
@@ -4724,7 +4743,7 @@ function settlePosition(pos, won, payoutDollars) {
         pnlHistory.push({ t: Date.now(), v: realPnlNow2 });
         if (pnlHistory.length > 200) pnlHistory.shift();
       }
-      log('Balance: $' + cashBefore.toFixed(2) + ' → $' + S.cash.toFixed(2)
+      log('Balance reconciled: $' + S.cash.toFixed(2)
         + ' | session P&L=' + (realPnlNow2 >= 0 ? '+' : '') + '$' + realPnlNow2.toFixed(2)
         + ' (start: $' + S.startPortfolio.toFixed(2) + ')', 'b');
     });
