@@ -2170,8 +2170,25 @@ function callClaude(prompt) {
     })
   }).then(function(d) {
     if (d.error) throw new Error(d.error.message || JSON.stringify(d.error));
-    var text = d.content.map(function(x) { return x.text || ''; }).join('').replace(/```json|```/g, '').trim();
-    return JSON.parse(text);
+    var raw = d.content.map(function(x) { return x.text || ''; }).join('');
+
+    // Strip markdown fences
+    var text = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+    // Extract just the JSON object — find first { and last }
+    var start = text.indexOf('{');
+    var end   = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      text = text.substring(start, end + 1);
+    }
+
+    // Final safety — if still not parseable, return skip signal
+    try {
+      return JSON.parse(text);
+    } catch(e) {
+      log('Signal parse error — raw: ' + raw.substring(0, 80), 'a');
+      return { direction: 'skip', confidence: 0, p: 0.5, b: 1, edge: 0, reason: 'parse error' };
+    }
   }).catch(function(e) { log('Signal engine fault: ' + e.message, 'r'); return null; });
 }
 
