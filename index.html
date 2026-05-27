@@ -2105,7 +2105,7 @@ function apiFetch(url, opts) {
     return fetch(url, opts || {}).then(function(r) { return r.json(); });
   }
   var now = Date.now();
-  var wait = Math.max(0, 250 - (now - _lastKalshiCall));
+  var wait = Math.max(0, 400 - (now - _lastKalshiCall));
   _lastKalshiCall = now + wait;
   return new Promise(function(res) { setTimeout(res, wait); }).then(function() {
     return fetch(url, opts || {}).then(function(r) {
@@ -2252,8 +2252,8 @@ function fetchBalance() {
       // Sync W/L from history rather than trusting local counters
       var settled = S.history ? S.history.filter(function(p){ return p.fillStatus === 'settled' && p._botPlaced; }) : [];
       if (settled.length > 0) {
-        S.wins   = settled.filter(function(p){ return p.won === true; }).length;
-        S.losses = settled.filter(function(p){ return p.won === false; }).length;
+        S.wins   = settled.filter(function(p){ return p.won === true  || (p.won == null && p.pnl != null && p.pnl > 0); }).length;
+        S.losses = settled.filter(function(p){ return p.won === false || (p.won == null && p.pnl != null && p.pnl <= 0); }).length;
         S.consLoss = (function() {
           var streak = 0;
           for (var i = settled.length - 1; i >= 0; i--) {
@@ -2490,7 +2490,7 @@ function fundingContext(asset) {
 
 // ── Recent Kalshi trade flow ───────────────────────────────────────
 function fetchRecentTrades(ticker) {
-  return apiFetch(PROXY + '/kalshi/trade-api/v2/markets/trades?ticker=' + ticker + '&limit=20')
+  return apiFetch(PROXY + '/kalshi/trade-api/v2/markets/trades?ticker=' + ticker + '&limit=10')
     .then(function(d) {
       var trades = d.trades || [];
       MARKET_INTEL.recentTrades[ticker] = trades;
@@ -4857,6 +4857,26 @@ function pollPosition(pos, attempts) {
   // This prevents phantom settlements on rejected/missing orders
   apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/orders/' + pos.id)
     .then(function(d) {
+      // 404 = order filled and moved to history — go straight to fills check
+      if (!d || d.code === 'not_found' || (d.error && d.error.code === 'not_found')
+          || (typeof d.detail === 'string' && d.detail.includes('not found'))) {
+        log('Order ' + pos.id.substring(0,8) + '... moved to history — checking fills', 'b');
+        return fetchPortfolioFill(pos.id).then(function(fill) {
+          if (fill) {
+            pos.contracts    = fill.contracts;
+            pos.entryPriceCents = fill.avgPriceCents;
+            pos.stake        = fill.totalCost;
+            pos.fillStatus   = 'filled';
+            renderPositions();
+            pollMarketResult(pos, 0);
+          } else {
+            log('No fill found for ' + pos.id.substring(0,8) + '... — removing', 'a');
+            S.positions = S.positions.filter(function(p){ return p.id !== pos.id; });
+            pos._settled = true;
+            renderPositions(); updateMetrics(); fetchBalance();
+          }
+        });
+      }
       var order = d.order || d;
       var status = (order.status || '').toLowerCase();
 
@@ -4992,14 +5012,8 @@ function pollMarketResult(pos, attempts) {
       log('WIN: +$' + netPnl.toFixed(2) + ' | ' + (pos.contracts||1) + ' contracts @ ' + entryCents + 'c → payout $' + grossPayout.toFixed(2), 'g');
       settlePosition(pos, true, netPnl);
 
-      // Then verify with real balance after payout (2s delay) — just for logging
-      setTimeout(function() {
-        var cashBefore = S.cash;
-        fetchBalance().then(function() {
-          var delta = S.cash - cashBefore;
-          log('Balance check post-win: Δ$' + delta.toFixed(2) + ' (expected ~$' + grossPayout.toFixed(2) + ')', delta > 0 ? 'g' : 'b');
-        });
-      }, 3000);
+      // Fetch balance 4s after win to update display
+      setTimeout(fetchBalance, 4000);
     }
 
   }).catch(function(e) {
