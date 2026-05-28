@@ -2027,6 +2027,17 @@ function renderPositions() {
     + '</tbody></table>';
 }
 
+// ── Market intelligence data store ────────────────────────────────
+var MARKET_INTEL = {
+  fearGreed:     null,
+  fundingRates:  {},
+  ivData:        null,
+  recentTrades:  {},
+  recentFills:   {},
+  tradeHistory:  [],
+  sessionSignals: []
+};
+
 // ── Fractional Kelly ramp (protects small budgets early on) ─────────
 function getKellyRampFactor() {
   var tradeCount = MARKET_INTEL.tradeHistory.length;
@@ -2433,17 +2444,6 @@ function getPriceVelocity(sym) {
   if (!old || !latest || old.p === 0) return null;
   return ((latest.p - old.p) / old.p) * 100;
 }
-
-// ── Market intelligence data store ────────────────────────────────
-var MARKET_INTEL = {
-  fearGreed:     null,
-  fundingRates:  {},
-  ivData:        null,
-  recentTrades:  {},
-  recentFills:   {},
-  tradeHistory:  [],
-  sessionSignals: []
-};
 
 // Fetch Binance klines — free public endpoint, no auth needed
 // interval: '1m','5m','15m' | limit: number of candles
