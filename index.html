@@ -1632,7 +1632,9 @@ var MARKET_INTEL = {
   recentTrades:  {},
   recentFills:   {},
   tradeHistory:  [],
-  sessionSignals: []
+  sessionSignals: [],
+  winRateByMkt:  {},
+  sessionPeak:   0
 };
 var S = {
   armed: false,
@@ -7354,6 +7356,7 @@ function partnerAsk(preset) {
 }
 
 function updateAnalytics() {
+  if (!MARKET_INTEL) return;
   updatePerformanceSummary();
   updateIndicatorCharts();
   // Fear & Greed
@@ -7410,7 +7413,7 @@ function updateAnalytics() {
   // Win rate by market
   var wrGrid = document.getElementById('winRateGrid');
   if (wrGrid) {
-    var entries = Object.keys(MARKET_INTEL.winRateByMkt);
+    var entries = Object.keys(MARKET_INTEL.winRateByMkt || {});
     if (!entries.length) return;
     wrGrid.innerHTML = entries.map(function(ticker) {
       var r = MARKET_INTEL.winRateByMkt[ticker];
