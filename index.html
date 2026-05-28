@@ -2057,6 +2057,104 @@ function getMinEdgeForStake(stakeDollars) {
   return S.cfg.edge / 100; // $10+: use configured edge minimum
 }
 
+function recordTradeOutcome(ticker, won, pnl) {
+  // Record to trade history for analytics
+  MARKET_INTEL.tradeHistory.push({ ticker: ticker, won: won, pnl: pnl, ts: Date.now() });
+  if (MARKET_INTEL.tradeHistory.length > 200) MARKET_INTEL.tradeHistory.shift();
+  // Record to win rate by market
+  if (!MARKET_INTEL.winRateByMkt) MARKET_INTEL.winRateByMkt = {};
+  if (!MARKET_INTEL.winRateByMkt[ticker]) MARKET_INTEL.winRateByMkt[ticker] = { wins: 0, losses: 0 };
+  if (won) MARKET_INTEL.winRateByMkt[ticker].wins++;
+  else MARKET_INTEL.winRateByMkt[ticker].losses++;
+  checkProfitLock();
+}
+
+function fearGreedContext() {
+  var fg = MARKET_INTEL.fearGreed;
+  if (!fg) return 'Fear & Greed: unavailable';
+  return 'Fear & Greed: ' + fg.value + ' (' + (fg.label || '') + ')';
+}
+
+function fundingContext(asset) {
+  var sym = asset && asset.includes('ETH') ? 'ETH' : 'BTC';
+  var fr = MARKET_INTEL.fundingRates[sym];
+  if (fr === undefined || fr === null) return 'Funding rate: unavailable';
+  return 'Funding rate (' + sym + '): ' + (fr >= 0 ? '+' : '') + fr.toFixed(4) + '%' +
+    (fr > 0.05 ? ' (longs paying — bearish)' : fr < -0.05 ? ' (shorts paying — bullish)' : ' (neutral)');
+}
+
+function tradeFlowContext(ticker) {
+  var trades = MARKET_INTEL.recentTrades[ticker] || [];
+  if (!trades.length) return 'Trade flow: no recent data';
+  var yesBuys = 0, noBuys = 0, totalVol = 0;
+  trades.forEach(function(t) {
+    var count = parseFloat(t.count || 1);
+    totalVol += count;
+    if (t.taker_side === 'yes') yesBuys += count;
+    else noBuys += count;
+  });
+  var yesPct = totalVol > 0 ? (yesBuys / totalVol * 100).toFixed(0) : 50;
+  var bias = yesPct > 60 ? 'YES-heavy buying' : yesPct < 40 ? 'NO-heavy buying' : 'balanced flow';
+  return 'Trade flow (' + trades.length + ' trades): ' + yesPct + '% YES takers — ' + bias;
+}
+
+function isInRecoveryMode() {
+  if (!S.startPortfolio || S.startPortfolio <= 0) return false;
+  var peak = MARKET_INTEL.sessionPeak || S.startPortfolio;
+  var current = S.cash + S.exposure;
+  return peak > 0 && ((peak - current) / peak) > 0.10;
+}
+
+function getDynamicKelly(baseKf) {
+  // Reduce Kelly during losing streaks, increase during winning streaks
+  if (S.consLoss >= 5) return baseKf * 0.25;
+  if (S.consLoss >= 3) return baseKf * 0.5;
+  if (S.consLoss >= 2) return baseKf * 0.75;
+  var recent = MARKET_INTEL.tradeHistory.slice(-10);
+  if (recent.length >= 5) {
+    var wr = recent.filter(function(t){ return t.won; }).length / recent.length;
+    if (wr >= 0.7) return Math.min(baseKf * 1.25, 1.0); // hot streak — up to 25% boost
+  }
+  return baseKf;
+}
+
+function getMarketWinRate(ticker) {
+  if (!ticker || !MARKET_INTEL.winRateByMkt) return null;
+  var r = MARKET_INTEL.winRateByMkt[ticker];
+  if (!r || (r.wins + r.losses) < 3) return null;
+  return r.wins / (r.wins + r.losses);
+}
+
+function getHourWinRate() {
+  var hist = MARKET_INTEL.tradeHistory || [];
+  if (hist.length < 5) return null;
+  var h = new Date().getHours();
+  var inHour = hist.filter(function(t) {
+    return new Date(t.ts || Date.now()).getHours() === h;
+  });
+  if (inHour.length < 3) return null;
+  return inHour.filter(function(t){ return t.won; }).length / inHour.length;
+}
+
+function checkProfitLock() {
+  if (!S.startPortfolio || S.startPortfolio <= 0) return;
+  var profit = (S.cash + S.exposure) - S.startPortfolio;
+  var profitPct = profit / S.startPortfolio;
+  // Lock in profits: if up >15%, switch to half-Kelly to protect gains
+  if (profitPct > 0.15 && !S.profitLockActive) {
+    S.profitLockActive = true;
+    log('PROFIT LOCK activated — up ' + (profitPct*100).toFixed(1) + '% — switching to half-Kelly', 'g');
+  } else if (profitPct < 0.05 && S.profitLockActive) {
+    S.profitLockActive = false;
+    log('PROFIT LOCK released', 'b');
+  }
+  // Update session peak for recovery mode detection
+  var current = S.cash + S.exposure;
+  if (current > (MARKET_INTEL.sessionPeak || 0)) {
+    MARKET_INTEL.sessionPeak = current;
+  }
+}
+
 function halfKellyStake(p, b) {
   // Sanity check inputs — bad p/b produces nonsensical Kelly fractions
   if (!isFinite(p) || p <= 0 || p >= 1) return 1.0; // default $1 stake
