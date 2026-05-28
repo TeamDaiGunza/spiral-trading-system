@@ -128,7 +128,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (reqPath === '/save-creds' && method === 'POST') {
-    try { const inc = JSON.parse(body); saveCreds(inc); creds = inc; return jsonResp(res, 200, { ok: true }); }
+    try {
+      const inc = JSON.parse(body);
+      const existing = loadCreds();
+      // Merge — never nuke existing keys (Kalshi, RH, Webull) by sending a partial update
+      Object.assign(existing, inc);
+      saveCreds(existing); creds = existing;
+      return jsonResp(res, 200, { ok: true });
+    }
     catch (e) { return jsonResp(res, 400, { ok: false, error: e.message }); }
   }
 
@@ -150,6 +157,7 @@ const server = http.createServer(async (req, res) => {
     let headers;
     try { headers = signKalshi(method, kalshiPath, pemKey, keyId); }
     catch (e) { return jsonResp(res, 500, { error: 'Signing failed: ' + e.message }); }
+    if (body) headers['Content-Length'] = Buffer.byteLength(body);
     try {
       const r = await httpsReq({ hostname: 'api.elections.kalshi.com', path: kalshiPath, method, headers }, body || undefined);
       jsonResp(res, r.status, r.body);
@@ -372,10 +380,10 @@ function createWindow() {
     app.quit();
   });
 
-  // Prevent crash-induced closes
-  mainWindow.webContents.on('crashed', (e, killed) => {
-    console.log('Renderer crashed — reloading', killed);
-    mainWindow.reload();
+  // Prevent crash-induced closes — reload renderer, don't kill the app
+  mainWindow.webContents.on('render-process-gone', (e, details) => {
+    console.log('Renderer gone:', details.reason, '— reloading');
+    setTimeout(() => { try { mainWindow.reload(); } catch(err) {} }, 1000);
   });
 
   mainWindow.webContents.on('unresponsive', () => {
@@ -384,10 +392,6 @@ function createWindow() {
 
   mainWindow.webContents.on('responsive', () => {
     console.log('Window responsive again');
-  });
-
-  mainWindow.on('unresponsive', () => {
-    console.log('App unresponsive');
   });
 }
 
