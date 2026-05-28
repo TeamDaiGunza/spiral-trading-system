@@ -1728,8 +1728,12 @@ function addSignal(dir, mkt, stake, reason, confidence, ticker) {
   if (emp) emp.remove();
 
   // Build Kalshi market URL if we have a ticker
-  var kalshiUrl = ticker
-    ? 'https://kalshi.com/markets/' + ticker.toLowerCase().replace(/_/g, '-')
+  // Correct format: kalshi.com/markets/{series}/{ticker}
+  // Both lowercased, colons replaced with dashes (e.g. KXBTC15M-2025-05-27T14:45 -> kxbtc15m-2025-05-27t14-45)
+  var tickerSlug  = ticker ? ticker.toLowerCase().replace(/:/g, '-') : null;
+  var seriesSlug  = tickerSlug ? tickerSlug.replace(/-\d{4}-.*$/, '') : null; // strip date part to get series
+  var kalshiUrl   = (tickerSlug && seriesSlug)
+    ? 'https://kalshi.com/markets/' + seriesSlug + '/' + tickerSlug
     : null;
 
   var linkHtml = kalshiUrl
@@ -2002,8 +2006,16 @@ function renderPositions() {
           : '<span style="color:var(--tx3);font-size:9px;font-family:var(--display)">'
             + (isSettled ? (p.won === true ? 'WIN' : 'LOSS') : '—') + '</span>';
 
+        var mktLink = p.ticker
+          ? (function() {
+              var ts = p.ticker.toLowerCase().replace(/:/g, '-');
+              var ss = ts.replace(/-\d{4}-.*$/, '');
+              return '<a href="https://kalshi.com/markets/' + ss + '/' + ts + '" target="_blank" style="color:inherit;text-decoration:none" title="View on Kalshi">' + p.mkt + ' ↗</a>';
+            })()
+          : p.mkt;
+
         return '<tr>'
-          + '<td style="max-width:0">' + p.mkt + '</td>'
+          + '<td style="max-width:0">' + mktLink + '</td>'
           + '<td><span class="badge ' + p.dir + '" title="' + (p.dir==='yes'?'Betting price goes UP':'Betting price goes DOWN') + '">' + p.dir.toUpperCase() + '</span></td>'
           + '<td class="mn">$' + p.stake.toFixed(2) + '</td>'
           + '<td><span style="color:' + statusColor + ';font-family:var(--display);font-size:9px;letter-spacing:0.05em">'
@@ -2390,300 +2402,164 @@ function getIndicators(sym) {
 }
 
 var LIVE_PRICES = { BTC: null, ETH: null, SOL: null, XRP: null, DOGE: null, lastFetch: 0 };
-var PRICE_HISTORY = { BTC: [], ETH: [], SOL: [], XRP: [], DOGE: [] }; // rolling 10-minute price log
+var PRICE_HISTORY = { BTC: [], ETH: [], SOL: [], XRP: [], DOGE: [] };
+
+// ── Binance symbol map ────────────────────────────────────────────
+var BINANCE_SYM = { BTC:'BTCUSDT', ETH:'ETHUSDT', SOL:'SOLUSDT', XRP:'XRPUSDT', DOGE:'DOGEUSDT' };
+
+// CANDLE_HISTORY[sym][interval] = [{t,o,h,l,c,v}, ...]
+var CANDLE_HISTORY = {};
 
 function recordPriceHistory(sym, price) {
   if (!PRICE_HISTORY[sym]) PRICE_HISTORY[sym] = [];
   PRICE_HISTORY[sym].push({ t: Date.now(), p: price });
-  // Keep last 20 readings (20 minutes at 1/min)
-  if (PRICE_HISTORY[sym].length > 20) PRICE_HISTORY[sym].shift();
+  if (PRICE_HISTORY[sym].length > 60) PRICE_HISTORY[sym].shift();
 }
 
 function getPriceVelocity(sym) {
-  // Returns % change over last 5 minutes
+  // Prefer 1m candles from Binance for accurate short-term velocity
+  var c1m = CANDLE_HISTORY[sym] && CANDLE_HISTORY[sym]['1m'];
+  if (c1m && c1m.length >= 6) {
+    var oldest = c1m[c1m.length - 6].c;  // 5 candles back
+    var newest = c1m[c1m.length - 1].c;
+    if (oldest > 0) return ((newest - oldest) / oldest) * 100;
+  }
+  // Fallback: PRICE_HISTORY polling data
   var hist = PRICE_HISTORY[sym] || [];
   if (hist.length < 2) return null;
-  var now = Date.now();
-  var fiveMinAgo = now - 5 * 60 * 1000;
+  var fiveMinAgo = Date.now() - 5 * 60 * 1000;
   var old = hist.find(function(h) { return h.t >= fiveMinAgo; }) || hist[0];
   var latest = hist[hist.length - 1];
   if (!old || !latest || old.p === 0) return null;
   return ((latest.p - old.p) / old.p) * 100;
 }
 
-// ── Market intelligence data store ────────────────────────────────
-var MARKET_INTEL = {
-  fearGreed:     null,  // 0-100, last fetch
-  fundingRates:  {},    // symbol -> rate
-  ivData:        null,  // implied volatility
-  recentTrades:  {},    // ticker -> [{price, side, size}]
-  lastFGFetch:   0,
-  lastFRFetch:   0,
-  tradeHistory:  [],    // all our trades for calibration
-  winRateByMkt:  {},    // ticker -> {wins, losses}
-  winRateByHour: {},    // hour -> {wins, losses}
-  sessionPeak:   0,     // session high watermark for profit lock
-};
-
-// ── Fear & Greed Index (alternative.me) ───────────────────────────
-function fetchFearGreed() {
-  var now = Date.now();
-  if (now - MARKET_INTEL.lastFGFetch < 180000) return Promise.resolve(MARKET_INTEL.fearGreed); // refresh every 3 min
-  return fetch('https://api.alternative.me/fng/?limit=1')
+// Fetch Binance klines — free public endpoint, no auth needed
+// interval: '1m','5m','15m' | limit: number of candles
+function fetchBinanceCandles(sym, interval, limit) {
+  var bsym = BINANCE_SYM[sym];
+  if (!bsym) return Promise.resolve(null);
+  var url = 'https://api.binance.com/api/v3/klines?symbol=' + bsym
+          + '&interval=' + interval + '&limit=' + limit;
+  return fetch(url)
     .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.data && d.data[0]) {
-        MARKET_INTEL.fearGreed = {
-          value: parseInt(d.data[0].value),
-          label: d.data[0].value_classification
+    .then(function(data) {
+      if (!Array.isArray(data) || !data.length) return null;
+      // Binance kline: [openTime, open, high, low, close, volume, ...]
+      var candles = data.map(function(k) {
+        return {
+          t: k[0],
+          o: parseFloat(k[1]),
+          h: parseFloat(k[2]),
+          l: parseFloat(k[3]),
+          c: parseFloat(k[4]),
+          v: parseFloat(k[5])
         };
-        MARKET_INTEL.lastFGFetch = Date.now();
-        log('Fear & Greed: ' + MARKET_INTEL.fearGreed.value + ' (' + MARKET_INTEL.fearGreed.label + ')', 'b');
-      }
-      return MARKET_INTEL.fearGreed;
-    }).catch(function() { return MARKET_INTEL.fearGreed; });
+      });
+      if (!CANDLE_HISTORY[sym]) CANDLE_HISTORY[sym] = {};
+      CANDLE_HISTORY[sym][interval] = candles;
+      return candles;
+    })
+    .catch(function() { return null; });
 }
 
-function fearGreedContext() {
-  var fg = MARKET_INTEL.fearGreed;
-  if (!fg) return 'Fear & Greed: unavailable';
-  var bias = fg.value <= 25 ? 'EXTREME FEAR - markets oversold, mean reversion likely'
-           : fg.value <= 45 ? 'FEAR - bearish sentiment, favor conservative plays'
-           : fg.value <= 55 ? 'NEUTRAL - no strong sentiment bias'
-           : fg.value <= 75 ? 'GREED - bullish sentiment, momentum favored'
-           : 'EXTREME GREED - markets overbought, pullback risk high';
-  return 'Fear & Greed Index: ' + fg.value + '/100 (' + fg.label + ') - ' + bias;
-}
-
-// ── Funding rates (Binance) ────────────────────────────────────────
-function fetchFundingRates() {
-  // Funding rate APIs are geo-blocked in US without auth keys
-  // Derive a momentum-bias signal from 24h price change instead
+// Refresh candles for a single symbol — 1m (30 candles = 30min history) and 5m (30 candles = 2.5hr)
+var _candleLastFetch = {};
+function refreshCandles(sym) {
   var now = Date.now();
-  if (now - MARKET_INTEL.lastFRFetch < 120000) return Promise.resolve(MARKET_INTEL.fundingRates);
-  var prices = LIVE_PRICES;
-  ['BTC','ETH','SOL','XRP','DOGE'].forEach(function(sym) {
-    var p = prices[sym];
-    if (!p) return;
-    // positive 24h change = market leaning long (positive "funding" proxy)
-    // negative 24h change = market leaning short (negative "funding" proxy)
-    MARKET_INTEL.fundingRates[sym] = p.change24h * 0.01; // scale to funding-like range
-  });
-  MARKET_INTEL.lastFRFetch = now;
-  return Promise.resolve(MARKET_INTEL.fundingRates);
-}
-
-function fundingContext(asset) {
-  var sym = asset.includes('Ethereum') ? 'ETH'
-           : asset.includes('Solana')  ? 'SOL'
-           : asset.includes('XRP')     ? 'XRP'
-           : asset.includes('Doge')    ? 'DOGE' : 'BTC';
-  var rate = MARKET_INTEL.fundingRates[sym];
-  if (rate === undefined || rate === null) return 'Momentum bias: unavailable';
-  var bias = rate > 0.15  ? 'STRONG UPTREND (24h momentum bullish)'
-           : rate > 0.03  ? 'Mild uptrend'
-           : rate < -0.15 ? 'STRONG DOWNTREND (24h momentum bearish)'
-           : rate < -0.03 ? 'Mild downtrend'
-           : 'Flat momentum';
-  return '24h momentum signal: ' + (rate > 0 ? '+' : '') + rate.toFixed(3) + ' - ' + bias;
-}
-
-// ── Recent Kalshi trade flow ───────────────────────────────────────
-// Shared cache for /markets/trades to prevent 429s — both fetchRecentTrades and fetchFills use this
-var _tradesCache = {}; // ticker -> { ts, trades }
-var TRADES_CACHE_TTL = 30000; // 30s — Kalshi rate limits this endpoint aggressively
-
-function fetchMarketTrades(ticker, limit) {
-  limit = limit || 50;
-  var cached = _tradesCache[ticker];
-  if (cached && (Date.now() - cached.ts) < TRADES_CACHE_TTL) {
-    return Promise.resolve(cached.trades);
-  }
-  return apiFetch(PROXY + '/kalshi/trade-api/v2/markets/trades?ticker=' + ticker + '&limit=' + limit)
-    .then(function(d) {
-      var trades = d.trades || d.fills || d.results || [];
-      _tradesCache[ticker] = { ts: Date.now(), trades: trades };
-      return trades;
-    }).catch(function() {
-      // Return stale cache on error rather than empty — better than nothing
-      return cached ? cached.trades : [];
-    });
-}
-
-function fetchRecentTrades(ticker) {
-  return fetchMarketTrades(ticker, 10).then(function(trades) {
-    MARKET_INTEL.recentTrades[ticker] = trades;
-    return trades;
+  var last = _candleLastFetch[sym] || 0;
+  if (now - last < 55000) return Promise.resolve(); // don't re-fetch within 55s
+  _candleLastFetch[sym] = now;
+  return Promise.all([
+    fetchBinanceCandles(sym, '1m', 35),   // 35 x 1m = enough for RSI(14) immediately
+    fetchBinanceCandles(sym, '5m', 30),   // 30 x 5m = 2.5hr context
+    fetchBinanceCandles(sym, '15m', 20)   // 20 x 15m = 5hr context
+  ]).then(function(results) {
+    // Feed 1m closes+volumes into INDICATOR_HISTORY so RSI/MACD get real candle data
+    var c1m = results[0];
+    if (c1m && c1m.length) {
+      // Replace INDICATOR_HISTORY for this sym with candle-based data
+      INDICATOR_HISTORY[sym] = c1m.map(function(k) {
+        return { price: k.c, vol: k.v, ts: k.t };
+      });
+    }
+    // Update PRICE_HISTORY from 1m candles too
+    if (c1m && c1m.length) {
+      PRICE_HISTORY[sym] = c1m.slice(-20).map(function(k) {
+        return { t: k.t, p: k.c };
+      });
+    }
   });
 }
 
-function tradeFlowContext(ticker) {
-  var trades = MARKET_INTEL.recentTrades[ticker] || [];
-  if (!trades.length) return 'Trade flow: no recent data';
-  var yesBuys = 0, noBuys = 0, totalVol = 0;
-  trades.forEach(function(t) {
-    var count = parseFloat(t.count || 1);
-    totalVol += count;
-    if (t.taker_side === 'yes') yesBuys += count;
-    else noBuys += count;
-  });
-  var yesPct = totalVol > 0 ? (yesBuys / totalVol * 100).toFixed(0) : 50;
-  var bias = yesPct > 65 ? 'STRONG YES FLOW (' + yesPct + '% yes buys)'
-           : yesPct < 35 ? 'STRONG NO FLOW (' + (100-yesPct) + '% no buys)'
-           : 'BALANCED FLOW (' + yesPct + '% yes)';
-  return 'Recent trade flow: ' + bias + ' | ' + trades.length + ' trades | vol: ' + totalVol.toFixed(0);
+// Get short-term change from candles
+function getCandleChange(sym, interval, periodsBack) {
+  var candles = CANDLE_HISTORY[sym] && CANDLE_HISTORY[sym][interval];
+  if (!candles || candles.length < periodsBack + 1) return null;
+  var old = candles[candles.length - 1 - periodsBack].c;
+  var now = candles[candles.length - 1].c;
+  if (!old || old === 0) return null;
+  return ((now - old) / old) * 100;
 }
 
-// ── Dynamic Kelly adjustment based on rolling win rate ─────────────
-function getDynamicKelly(baseKf) {
-  var recent = MARKET_INTEL.tradeHistory.slice(-20);
-  if (recent.length < 5) return baseKf; // not enough data yet
-  var wins = recent.filter(function(t) { return t.won; }).length;
-  var winRate = wins / recent.length;
-  var adj;
-  if (winRate >= 0.65)      adj = Math.min(1.0, baseKf * 1.5);   // hot streak - scale up
-  else if (winRate >= 0.55) adj = baseKf;                          // normal
-  else if (winRate >= 0.45) adj = baseKf * 0.75;                  // cooling - scale down
-  else                       adj = baseKf * 0.5;                   // cold - cut in half
-  if (adj !== baseKf) {
-    log('Dynamic Kelly: ' + (winRate*100).toFixed(0) + '% win rate -> ' + (adj*100).toFixed(0) + '% Kelly', 'b');
+// ATR-based volatility from 1m candles — how much is this asset moving right now
+function getCandleATR(sym, period) {
+  period = period || 14;
+  var c1m = CANDLE_HISTORY[sym] && CANDLE_HISTORY[sym]['1m'];
+  if (!c1m || c1m.length < period + 1) return null;
+  var trs = [];
+  for (var i = c1m.length - period; i < c1m.length; i++) {
+    var high = c1m[i].h, low = c1m[i].l, prevClose = c1m[i-1] ? c1m[i-1].c : low;
+    trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
   }
-  return adj;
-}
-
-// ── Spread filter ──────────────────────────────────────────────────
-function spreadTooWide(mkt) {
-  var bid = parseFloat(mkt.yes_bid_dollars || 0) * 100;
-  var ask = parseFloat(mkt.yes_ask_dollars || 0) * 100;
-  var spread = ask - bid;
-  var MAX_SPREAD = 8; // cents
-  if (spread > MAX_SPREAD) {
-    log('Spread filter: ' + mkt.ticker + ' spread=' + spread.toFixed(0) + 'c (max ' + MAX_SPREAD + 'c) - skipping', 'a');
-    return true;
-  }
-  return false;
-}
-
-// ── Correlation blocker ────────────────────────────────────────────
-function correlatedPositionExists(newSeries) {
-  var cryptoGroup = ['KXBTC15M','KXBTCD','KXETH15M','KXETH','KXSOL15M','KXSOLD','KXXRP15M','KXDOGE15M'];
-  var newIsCrypto = cryptoGroup.some(function(s) { return newSeries.startsWith(s.slice(0,5)); });
-  if (!newIsCrypto) return false;
-  // check if we already have a crypto position in the same direction
-  var assetBase = newSeries.slice(0, 5); // KXBTC, KXETH, etc
-  var hasCorrelated = S.positions.some(function(pos) {
-    return pos.ticker && pos.ticker.startsWith(assetBase);
-  });
-  if (hasCorrelated) {
-    log('Correlation block: already holding ' + assetBase + ' position', 'a');
-    return true;
-  }
-  return false;
-}
-
-// ── Volume spike detector ──────────────────────────────────────────
-var volumeHistory = {}; // ticker -> [vol readings]
-function checkVolumeSpike(mkt) {
-  var ticker = mkt.ticker;
-  var vol = parseFloat(mkt.volume_24h_fp || 0);
-  if (!volumeHistory[ticker]) volumeHistory[ticker] = [];
-  volumeHistory[ticker].push(vol);
-  if (volumeHistory[ticker].length > 10) volumeHistory[ticker].shift();
-  if (volumeHistory[ticker].length < 3) return false;
-  var avg = volumeHistory[ticker].slice(0,-1).reduce(function(a,b){return a+b;},0)
-          / (volumeHistory[ticker].length - 1);
-  var spike = avg > 0 && vol > avg * 1.5;
-  if (spike) log('Volume spike detected: ' + ticker + ' vol=' + vol.toFixed(0) + ' avg=' + avg.toFixed(0), 'g');
-  return spike;
-}
-
-// ── Session profit lock ────────────────────────────────────────────
-function checkProfitLock() {
-  if (MARKET_INTEL.sessionPeak < S.pnl) MARKET_INTEL.sessionPeak = S.pnl;
-  var lockThreshold = S.startPortfolio * 0.05; // 5% session gain
-  if (S.pnl >= lockThreshold && !S.profitLockActive) {
-    S.profitLockActive = true;
-    log('PROFIT LOCK: session up $' + S.pnl.toFixed(2) + ' - switching to half-size protection mode', 'g');
-    soundProfitLock();
-  }
-  if (S.pnl < lockThreshold * 0.5) S.profitLockActive = false; // reset if given back
-}
-
-// ── Drawdown recovery mode ─────────────────────────────────────────
-function isInRecoveryMode() {
-  if (!MARKET_INTEL.sessionPeak || MARKET_INTEL.sessionPeak <= 0) return false;
-  var dd = (MARKET_INTEL.sessionPeak - S.pnl) / Math.max(1, Math.abs(MARKET_INTEL.sessionPeak));
-  if (dd >= 0.1) {
-    log('Recovery mode: drawdown from peak ' + (dd*100).toFixed(1) + '% - using conservative sizing', 'a');
-    return true;
-  }
-  return false;
-}
-
-// ── Per-market win rate tracking ───────────────────────────────────
-function recordTradeOutcome(ticker, won, pnl) {
-  MARKET_INTEL.tradeHistory.push({ ticker: ticker, won: won, pnl: pnl, t: Date.now() });
-  if (MARKET_INTEL.tradeHistory.length > 200) MARKET_INTEL.tradeHistory.shift();
-  if (!MARKET_INTEL.winRateByMkt[ticker]) MARKET_INTEL.winRateByMkt[ticker] = { wins: 0, losses: 0 };
-  if (won) MARKET_INTEL.winRateByMkt[ticker].wins++;
-  else MARKET_INTEL.winRateByMkt[ticker].losses++;
-  var hour = new Date().getHours();
-  if (!MARKET_INTEL.winRateByHour[hour]) MARKET_INTEL.winRateByHour[hour] = { wins: 0, losses: 0 };
-  if (won) MARKET_INTEL.winRateByHour[hour].wins++;
-  else MARKET_INTEL.winRateByHour[hour].losses++;
-}
-
-function getMarketWinRate(ticker) {
-  var r = MARKET_INTEL.winRateByMkt[ticker];
-  if (!r || (r.wins + r.losses) < 3) return null;
-  return r.wins / (r.wins + r.losses);
-}
-
-function getHourWinRate() {
-  var hour = new Date().getHours();
-  var r = MARKET_INTEL.winRateByHour[hour];
-  if (!r || (r.wins + r.losses) < 3) return null;
-  return r.wins / (r.wins + r.losses);
+  return trs.reduce(function(a,b){return a+b;},0) / trs.length;
 }
 
 function fetchLivePrices() {
   var now = Date.now();
-  if (now - LIVE_PRICES.lastFetch < 30000) return Promise.resolve(LIVE_PRICES); // refresh every 30s
-  return fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,ripple,dogecoin&vs_currencies=usd&include_24hr_change=true')
+  if (now - LIVE_PRICES.lastFetch < 30000) return Promise.resolve(LIVE_PRICES);
+
+  // Fetch spot prices from CoinGecko (includes 24h change)
+  var cgFetch = fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,ripple,dogecoin&vs_currencies=usd&include_24hr_change=true')
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      LIVE_PRICES.BTC  = d.bitcoin  ? { price: d.bitcoin.usd,   change24h: d.bitcoin.usd_24h_change  } : null;
-      LIVE_PRICES.ETH  = d.ethereum ? { price: d.ethereum.usd,  change24h: d.ethereum.usd_24h_change } : null;
-      LIVE_PRICES.SOL  = d.solana   ? { price: d.solana.usd,    change24h: d.solana.usd_24h_change   } : null;
-      LIVE_PRICES.XRP  = d.ripple   ? { price: d.ripple.usd,    change24h: d.ripple.usd_24h_change   } : null;
-      LIVE_PRICES.DOGE = d.dogecoin ? { price: d.dogecoin.usd,  change24h: d.dogecoin.usd_24h_change } : null;
-      // Record price history for velocity + indicators
-      ['BTC','ETH','SOL','XRP','DOGE'].forEach(function(sym) {
-        if (LIVE_PRICES[sym]) {
-          recordPriceHistory(sym, LIVE_PRICES[sym].price);
-          recordIndicatorData(sym, LIVE_PRICES[sym].price, null);
-        }
-      });
-      // Live-update charts if Analytics tab is active
-      var analyticsActive = document.getElementById('psec-analytics');
-      if (analyticsActive && analyticsActive.classList.contains('active')) {
-        updateIndicatorCharts();
-      }
-      // Signal chart updates if Signals tab is active
-      var signalsActive = document.getElementById('psec-signals');
-      if (signalsActive && signalsActive.style.display !== 'none') {
-        // Update symbol to match selected asset
-        var sel = document.getElementById('signalChartAsset');
-        if (sel) SIGNAL_CHART_SYM = sel.value;
-        drawSignalChart();
-      }
-      // Prediction chart always updates (it's on dashboard)
-      drawPredictionChart();
-      LIVE_PRICES.lastFetch = Date.now();
-      updateTicker(LIVE_PRICES);
-      return LIVE_PRICES;
-    })
-    .catch(function() { return LIVE_PRICES; });
+      LIVE_PRICES.BTC  = d.bitcoin  ? { price: d.bitcoin.usd,   change24h: d.bitcoin.usd_24h_change   } : (LIVE_PRICES.BTC  || null);
+      LIVE_PRICES.ETH  = d.ethereum ? { price: d.ethereum.usd,  change24h: d.ethereum.usd_24h_change  } : (LIVE_PRICES.ETH  || null);
+      LIVE_PRICES.SOL  = d.solana   ? { price: d.solana.usd,    change24h: d.solana.usd_24h_change    } : (LIVE_PRICES.SOL  || null);
+      LIVE_PRICES.XRP  = d.ripple   ? { price: d.ripple.usd,    change24h: d.ripple.usd_24h_change    } : (LIVE_PRICES.XRP  || null);
+      LIVE_PRICES.DOGE = d.dogecoin ? { price: d.dogecoin.usd,  change24h: d.dogecoin.usd_24h_change  } : (LIVE_PRICES.DOGE || null);
+    }).catch(function() {});
+
+  // Refresh 1m/5m/15m candles for all active symbols from Binance
+  var candleFetches = ['BTC','ETH','SOL','XRP','DOGE'].map(function(sym) {
+    return refreshCandles(sym);
+  });
+
+  return Promise.all([cgFetch].concat(candleFetches)).then(function() {
+    // Enrich LIVE_PRICES with short-term momentum from candles
+    ['BTC','ETH','SOL','XRP','DOGE'].forEach(function(sym) {
+      if (!LIVE_PRICES[sym]) return;
+      LIVE_PRICES[sym].change5m  = getCandleChange(sym, '1m',  5)  || 0;
+      LIVE_PRICES[sym].change15m = getCandleChange(sym, '5m',  3)  || 0;  // 3×5m = 15m
+      LIVE_PRICES[sym].change1h  = getCandleChange(sym, '5m', 12)  || 0;  // 12×5m = 1h
+      LIVE_PRICES[sym].atr1m     = getCandleATR(sym, 14)           || 0;
+      // Record for chart/ticker use
+      recordPriceHistory(sym, LIVE_PRICES[sym].price);
+    });
+
+    var analyticsActive = document.getElementById('psec-analytics');
+    if (analyticsActive && analyticsActive.classList.contains('active')) updateIndicatorCharts();
+    var signalsActive = document.getElementById('psec-signals');
+    if (signalsActive && signalsActive.style.display !== 'none') {
+      var sel = document.getElementById('signalChartAsset');
+      if (sel) SIGNAL_CHART_SYM = sel.value;
+      drawSignalChart();
+    }
+    drawPredictionChart();
+    LIVE_PRICES.lastFetch = Date.now();
+    updateTicker(LIVE_PRICES);
+    return LIVE_PRICES;
+  }).catch(function() { return LIVE_PRICES; });
 }
 var SERIES_LABELS = {
   'KXBTCD':   'BTC/hr',  'KXBTC15M': 'BTC/15m',  'KXBTC': 'BTC',
@@ -3290,7 +3166,11 @@ function runCycle() {
         var ob = res2[0];
         var liveData = prices[assetCode] || prices.BTC || null;
         var priceCtx = liveData
-          ? 'Current live price: $' + liveData.price.toLocaleString() + ' | 24h: ' + liveData.change24h.toFixed(2) + '%'
+          ? 'Live: $' + liveData.price.toLocaleString()
+            + ' | 5m: ' + (liveData.change5m >= 0 ? '+' : '') + (liveData.change5m || 0).toFixed(3) + '%'
+            + ' | 15m: ' + (liveData.change15m >= 0 ? '+' : '') + (liveData.change15m || 0).toFixed(3) + '%'
+            + ' | 1h: ' + (liveData.change1h >= 0 ? '+' : '') + (liveData.change1h || 0).toFixed(2) + '%'
+            + ' | 24h: ' + (liveData.change24h || 0).toFixed(2) + '%'
           : 'Live price unavailable';
         var obCtx   = ob ? '\nOrderbook: ' + orderbookSummary(ob) : '';
         var fgCtx   = '\n' + fearGreedContext();
@@ -3302,23 +3182,24 @@ function runCycle() {
         if (hourWr !== null) calibCtx += ' | This hour: ' + (hourWr*100).toFixed(0) + '%';
         var fullCtx = priceCtx + obCtx + fgCtx + frCtx + flowCtx + calibCtx;
 
-        // Trend alignment: don't fight strong 24h momentum on 15-min markets
+        // Trend alignment: use 5m + 15m candle momentum, not stale 24h
         if (is15m && liveData) {
-          var chg24 = liveData.change24h;
-          // Adaptive trend filter — hard block only on extreme trends (>6%)
-          // Moderate trends (3-6%) require higher consensus instead of full block
-          if (chg24 > 6 && qEdge.direction === 'no') {
-            log('TREND BLOCK: ' + asset + ' +' + chg24.toFixed(1) + '% — extreme uptrend, skipping NO', 'a');
-            addSignal('skip', mktTitle.substring(0,28), 0, 'extreme uptrend', 50, mkt.ticker);
+          var chg5m  = liveData.change5m  || 0;
+          var chg15m = liveData.change15m || 0;
+          var chg24  = liveData.change24h || 0; // keep for display only
+          // Hard block: 15m candle strongly against our direction (>0.8% in 15m)
+          if (chg15m > 0.8 && qEdge.direction === 'no') {
+            log('TREND BLOCK: ' + asset + ' +' + chg15m.toFixed(2) + '% in 15m — fighting uptrend on NO', 'a');
+            addSignal('skip', mktTitle.substring(0,28), 0, 'strong 15m uptrend', 50, mkt.ticker);
             updateAll(); return;
           }
-          if (chg24 < -6 && qEdge.direction === 'yes') {
-            log('TREND BLOCK: ' + asset + ' ' + chg24.toFixed(1) + '% — extreme downtrend, skipping YES', 'a');
-            addSignal('skip', mktTitle.substring(0,28), 0, 'extreme downtrend', 50, mkt.ticker);
+          if (chg15m < -0.8 && qEdge.direction === 'yes') {
+            log('TREND BLOCK: ' + asset + ' ' + chg15m.toFixed(2) + '% in 15m — fighting downtrend on YES', 'a');
+            addSignal('skip', mktTitle.substring(0,28), 0, 'strong 15m downtrend', 50, mkt.ticker);
             updateAll(); return;
           }
-          // Moderate trend — requires extra consensus signal (4 instead of 3)
-          var trendPenalty = (Math.abs(chg24) > 3) ? 1 : 0;
+          // Moderate trend — require stronger consensus
+          var trendPenalty = (Math.abs(chg15m) > 0.4 || Math.abs(chg24) > 3) ? 1 : 0;
 
           // 5-min velocity reality check — tightened thresholds
           var vel5 = getPriceVelocity(assetCode);
@@ -3374,14 +3255,28 @@ function runCycle() {
         log('Proceeding with ' + qEdge.direction.toUpperCase() + ' signal | ' + qEdge.yesVotes + ' YES + ' + qEdge.noVotes + ' NO votes', 'b');
 
         var prompt1 = getStrategyPrompt(asset, interval, mkt, yesPrice, vol, fullCtx, strikePrice, is15m, qEdge);
-        // alternate framing for signal 2 (different angle, same data)
-        var prompt2 = 'You are a risk manager reviewing a proposed Kalshi trade.\n'
-          + 'Asset: ' + asset + ' | Market: "' + mktTitle + '"\n'
-          + 'YES ask: ' + yesPrice + '% | Quant edge: ' + (qEdge.edge*100).toFixed(1) + '% (' + qEdge.summary + ')\n'
-          + fullCtx + '\n'
-          + 'QUESTION: Should we trade this? Is the quantitative edge real or a false signal?\n'
-          + 'Be skeptical. If uncertain — skip. Consider spread costs (~' + (yesPrice - qEdge.mid).toFixed(0) + 'c to cross).\n'
-          + 'Return ONLY JSON: {"direction":"yes"|"no"|"skip","confidence":50-99,"p":0.01-0.99,"b":0.1-5.0,"reason":"12 words","edge":0-0.3}';
+        // Signal 2: independent view from raw candle data only — does NOT see quant summary
+        // This forces genuine independent analysis, not just quant validation
+        var candleSymP2 = (assetCode === 'ETH' ? 'ETH' : assetCode === 'SOL' ? 'SOL'
+                        : assetCode === 'XRP' ? 'XRP' : assetCode === 'DOGE' ? 'DOGE' : 'BTC');
+        var ldP2 = LIVE_PRICES[candleSymP2] || {};
+        var prompt2 = 'You are an independent Kalshi trader. Analyze this market from scratch.\n'
+          + 'Market: "' + mktTitle + '" | YES costs: ' + yesPrice + 'c per contract\n'
+          + 'If YES wins: you collect $1.00 per contract. If NO: you lose the ' + yesPrice + 'c cost.\n'
+          + '\n=== RAW MARKET DATA ==='
+          + '\nOrderbook: ' + (ob ? orderbookSummary(ob) : 'unavailable')
+          + '\nRecent trade flow: ' + tradeFlowContext(mkt.ticker)
+          + '\n\n=== ASSET PRICE (Binance candles) ==='
+          + '\n' + asset + ' spot: $' + (ldP2.price ? ldP2.price.toLocaleString() : '?')
+          + '\n5m change: ' + ((ldP2.change5m||0) >= 0 ? '+' : '') + (ldP2.change5m||0).toFixed(3) + '%'
+          + '\n15m change: ' + ((ldP2.change15m||0) >= 0 ? '+' : '') + (ldP2.change15m||0).toFixed(3) + '%'
+          + '\n1h change: ' + ((ldP2.change1h||0) >= 0 ? '+' : '') + (ldP2.change1h||0).toFixed(2) + '%'
+          + '\n1m ATR: ' + (ldP2.atr1m ? '$' + ldP2.atr1m.toFixed(2) : 'n/a')
+          + (strikePrice ? '\nStrike target: $' + strikePrice : '')
+          + '\n\nSpread cost to cross: ~' + (yesPrice - qEdge.mid).toFixed(0) + 'c'
+          + '\nTime in window: 15 minutes'
+          + '\n\nBe skeptical. Only trade with real conviction. If uncertain — skip.'
+          + '\nReturn ONLY JSON: {"direction":"yes"|"no"|"skip","confidence":50-99,"p":0.01-0.99,"b":0.1-5.0,"reason":"12 words","edge":0-0.3}';
 
         return callClaudeDual(prompt1, prompt2).then(function(signal) {
           if (!signal) { updateAll(); return; }
@@ -4258,19 +4153,34 @@ function calcQuantEdge(mkt, prices, ob, recentTrades, fills, timing, strikeInfo)
     else { votes.flow = 0; signals.push('Flow: neutral'); }
   } else { signals.push('Flow: insufficient data (<5 trades)'); }
 
-  // ── 3. MOMENTUM vs MARKET PRICE ──────────────────────────────────
+  // ── 3. SHORT-TERM MOMENTUM vs MARKET PRICE ──────────────────────
+  // Uses real Binance candle data: 5m and 15m change, NOT stale 24h
   var assetKey = mkt._series && mkt._series.includes('ETH') ? 'ETH'
                : mkt._series && mkt._series.includes('SOL') ? 'SOL'
-               : mkt._series && mkt._series.includes('DOGE') ? 'DOGE' : 'BTC';
+               : mkt._series && mkt._series.includes('DOGE') ? 'DOGE'
+               : mkt._series && mkt._series.includes('XRP')  ? 'XRP' : 'BTC';
   var liveData = prices[assetKey];
   if (liveData && mkt._series && mkt._series.includes('15M')) {
-    var chg = liveData.change24h;
-    // Only signal when there's a clear disagreement between price trend and market odds
-    if      (chg >  4 && mid < 42) { votes.mom =  1; strengths.mom = 0.14; signals.push('Mom: +' + chg.toFixed(1) + '% vs ' + mid.toFixed(0) + 'c'); }
-    else if (chg >  2 && mid < 46) { votes.mom =  1; strengths.mom = 0.07; signals.push('Mom: uptrend discount'); }
-    else if (chg < -4 && mid > 58) { votes.mom = -1; strengths.mom = 0.14; signals.push('Mom: -' + Math.abs(chg).toFixed(1) + '% vs ' + mid.toFixed(0) + 'c'); }
-    else if (chg < -2 && mid > 54) { votes.mom = -1; strengths.mom = 0.07; signals.push('Mom: downtrend premium'); }
-    else { signals.push('Mom: aligned'); }
+    var chg5m  = liveData.change5m  || 0;   // real 5-minute candle change
+    var chg15m = liveData.change15m || 0;   // real 15-minute candle change
+    // 5m and 15m in same direction = confirmed short-term trend
+    var momDir = (chg5m > 0 && chg15m > 0) ? 1 : (chg5m < 0 && chg15m < 0) ? -1 : 0;
+    var momMag = Math.abs(chg5m);
+
+    // Signal: short-term trend disagrees with market pricing
+    if (momDir === 1) {
+      // Upward momentum — market pricing YES too low?
+      if      (momMag > 0.5 && mid < 44) { votes.mom =  1; strengths.mom = 0.16; signals.push('Mom5m: +' + chg5m.toFixed(2) + '% rising, YES at ' + mid.toFixed(0) + 'c'); }
+      else if (momMag > 0.2 && mid < 48) { votes.mom =  1; strengths.mom = 0.09; signals.push('Mom5m: rising +' + chg5m.toFixed(2) + '%'); }
+      else { signals.push('Mom5m: +' + chg5m.toFixed(2) + '% aligned'); }
+    } else if (momDir === -1) {
+      // Downward momentum — market pricing YES too high?
+      if      (momMag > 0.5 && mid > 56) { votes.mom = -1; strengths.mom = 0.16; signals.push('Mom5m: -' + Math.abs(chg5m).toFixed(2) + '% falling, YES at ' + mid.toFixed(0) + 'c'); }
+      else if (momMag > 0.2 && mid > 52) { votes.mom = -1; strengths.mom = 0.09; signals.push('Mom5m: falling -' + Math.abs(chg5m).toFixed(2) + '%'); }
+      else { signals.push('Mom5m: -' + Math.abs(chg5m).toFixed(2) + '% aligned'); }
+    } else {
+      signals.push('Mom5m: mixed (' + (chg5m>=0?'+':'') + chg5m.toFixed(2) + '% 5m / ' + (chg15m>=0?'+':'') + chg15m.toFixed(2) + '% 15m)');
+    }
   }
 
   // ── 4. FEAR & GREED (contrarian only at extremes) ────────────────
@@ -4280,17 +4190,17 @@ function calcQuantEdge(mkt, prices, ob, recentTrades, fills, timing, strikeInfo)
     else if (fg.value >= 85 && mid > 52) { votes.fg = -1; strengths.fg = 0.10; signals.push('F&G: extreme greed (' + fg.value + ')'); }
   }
 
-  // ── 5. PRICE VELOCITY (5-min trend) ──────────────────────────────
-  var assetVel = mkt._series && mkt._series.includes('ETH') ? 'ETH'
-               : mkt._series && mkt._series.includes('SOL') ? 'SOL'
-               : mkt._series && mkt._series.includes('DOGE') ? 'DOGE' : 'BTC';
-  var vel = getPriceVelocity(assetVel);
+  // ── 5. PRICE VELOCITY from real 1m candles ───────────────────────
+  var assetVel = assetKey; // reuse same asset key
+  var vel = getPriceVelocity(assetVel); // now uses Binance 1m candles when available
+  var atr = liveData && liveData.atr1m || 0; // 14-period ATR on 1m candles in dollars
   if (vel !== null && mkt._series && mkt._series.includes('15M')) {
-    if      (vel >  0.5) { votes.vel =  1; strengths.vel = 0.12; signals.push('Vel: +' + vel.toFixed(2) + '% 5m'); }
-    else if (vel >  0.3) { votes.vel =  1; strengths.vel = 0.06; signals.push('Vel: rising'); }  // raised from 0.2
-    else if (vel < -0.5) { votes.vel = -1; strengths.vel = 0.12; signals.push('Vel: -' + Math.abs(vel).toFixed(2) + '% 5m'); }
-    else if (vel < -0.3) { votes.vel = -1; strengths.vel = 0.06; signals.push('Vel: falling'); } // raised from 0.2
-    else { signals.push('Vel: flat'); }
+    // Normalize velocity against ATR — a 0.3% move on BTC means something different than DOGE
+    if      (vel >  0.4) { votes.vel =  1; strengths.vel = 0.13; signals.push('Vel1m: +' + vel.toFixed(2) + '% (strong)'); }
+    else if (vel >  0.15){ votes.vel =  1; strengths.vel = 0.07; signals.push('Vel1m: +' + vel.toFixed(2) + '% rising'); }
+    else if (vel < -0.4) { votes.vel = -1; strengths.vel = 0.13; signals.push('Vel1m: -' + Math.abs(vel).toFixed(2) + '% (strong)'); }
+    else if (vel < -0.15){ votes.vel = -1; strengths.vel = 0.07; signals.push('Vel1m: -' + Math.abs(vel).toFixed(2) + '% falling'); }
+    else { signals.push('Vel1m: flat (' + (vel>=0?'+':'') + vel.toFixed(2) + '%)'); }
   }
 
   // ── 6. SPREAD QUALITY — tight spread = high liquidity = reliable signals ──
@@ -4505,13 +4415,23 @@ function getStrategyPrompt(asset, interval, mkt, yesPrice, vol, priceCtx, strike
            + ' | MFI(14): ' + mfiLabel + mfiSig;
   }
 
+  var candleSym = asset.includes('Ethereum') ? 'ETH'
+               : asset.includes('Solana')   ? 'SOL'
+               : asset.includes('Doge')     ? 'DOGE'
+               : asset.includes('XRP')      ? 'XRP' : 'BTC';
+  var liveForPrompt = LIVE_PRICES[candleSym];
+  var vel5m = getPriceVelocity(candleSym);
   var velCtx = '';
-  var velSym = asset.includes('Ethereum') ? 'ETH'
-             : asset.includes('Solana')   ? 'SOL'
-             : asset.includes('Doge')     ? 'DOGE'
-             : asset.includes('XRP')      ? 'XRP' : 'BTC';
-  var vel5m = getPriceVelocity(velSym);
-  if (vel5m !== null) velCtx = '\n5-min price velocity: ' + (vel5m >= 0 ? '+' : '') + vel5m.toFixed(3) + '%';
+  if (liveForPrompt) {
+    velCtx = '\n=== SHORT-TERM PRICE DATA (from Binance 1m/5m candles) ==='
+           + '\n5m change:  ' + (liveForPrompt.change5m  >= 0 ? '+' : '') + (liveForPrompt.change5m  || 0).toFixed(3) + '%'
+           + '\n15m change: ' + (liveForPrompt.change15m >= 0 ? '+' : '') + (liveForPrompt.change15m || 0).toFixed(3) + '%'
+           + '\n1h change:  ' + (liveForPrompt.change1h  >= 0 ? '+' : '') + (liveForPrompt.change1h  || 0).toFixed(2) + '%'
+           + '\n1m velocity: ' + (vel5m !== null ? (vel5m >= 0 ? '+' : '') + vel5m.toFixed(3) + '%' : 'n/a')
+           + '\n1m ATR: ' + (liveForPrompt.atr1m ? '$' + liveForPrompt.atr1m.toFixed(2) : 'n/a') + ' (typical 1-min range)';
+  } else if (vel5m !== null) {
+    velCtx = '\n5-min velocity: ' + (vel5m >= 0 ? '+' : '') + vel5m.toFixed(3) + '%';
+  }
 
   base += '\n=== YOUR TASK ===\n'
     + 'IMPORTANT CALIBRATION RULES:\n'
@@ -4669,73 +4589,140 @@ function startMomentumWatch(pos, entryPrice) {
   }, 30000); // check every 30s for 15m markets
 }
 
-function closePosition(pos, currentPriceCents) {
+function closePosition(pos, currentPriceCents, _attempt) {
+  _attempt = _attempt || 0;
+
   // Sanity checks
   if (!pos || pos._settled) { log('CLOSE SKIP: position already settled', 'b'); return; }
   if (!isFinite(currentPriceCents) || currentPriceCents <= 0) {
     log('CLOSE BLOCKED: invalid exit price ' + currentPriceCents, 'r'); return;
   }
-  // Don't bother closing if position is already near worthless
   if (currentPriceCents < 3) {
     log('Position near worthless (' + currentPriceCents + 'c) — letting settle naturally', 'a');
     return;
   }
-  // Don't close if already removed from positions list (settled)
   if (!S.positions.some(function(p) { return p.id === pos.id; })) {
-    log('Position already settled — skipping close', 'b');
+    log('Position already removed — skipping close', 'b'); return;
+  }
+  if (_attempt > 3) {
+    log('Close failed after ' + _attempt + ' attempts — falling back to natural settlement', 'a');
+    pollMarketResult(pos, 0);
     return;
   }
-  // To close a YES position: sell YES = buy NO at (100 - currentPrice)
-  // To close a NO position: sell NO = buy YES at currentPrice  
-  // Kalshi always uses action:'buy' — you buy the opposite side to close
+
   var closeSide     = pos.dir === 'yes' ? 'no' : 'yes';
-  var closeYesPrice = pos.dir === 'yes'
-    ? (100 - currentPriceCents)   // closing YES: buy NO at inverse price
-    : currentPriceCents;          // closing NO: buy YES at current price
+  // closePrice = cost per contract for the closing side
+  // Closing YES: we buy NO, NO costs (100 - currentYesBid)
+  // Closing NO:  we buy YES, YES costs currentYesBid
+  var closePrice = pos.dir === 'yes'
+    ? (100 - currentPriceCents)
+    : currentPriceCents;
   var contractCount = pos.contracts || Math.round(pos.stake / (Math.max(1, pos.entryPriceCents || 50) / 100));
 
-  log('Closing: ' + pos.ticker + ' | buying ' + closeSide.toUpperCase() + ' x' + contractCount + ' @ ' + closeYesPrice + 'c (yes_price) to close ' + pos.dir.toUpperCase() + ' position', 'b');
+  // Widen by 1c per retry so we cross the spread on repeated attempts
+  // buildOrderBody adds another 2c on top — so attempt 0 = +2c, attempt 1 = +3c, etc.
+  var adjustedPrice = Math.min(97, Math.max(1, closePrice + _attempt));
 
-  apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/orders', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ticker:           pos.ticker,
-      action:           'buy',
-      side:             closeSide,
-      type:             'limit',
-      count:            contractCount,
-      yes_price:        closeYesPrice,
-      reduce_only:      true,          // critical: nets against existing position, doesn't open new one
-      time_in_force:    'fill_or_kill', // fill immediately or cancel — no hanging limit orders
-      client_order_id:  'close-' + pos.id + '-' + Date.now()
-    })
+  log('Close attempt ' + (_attempt+1) + ': ' + pos.ticker + ' | ' + closeSide.toUpperCase()
+    + ' x' + contractCount + ' @ ' + adjustedPrice + 'c (close-side cost)', 'b');
+
+  // Use the same endpoint/format as placeOrder — reduce_only and fill_or_kill
+  // cause 400 Bad Request on Kalshi's legacy endpoint
+  discoverOrderEndpoint().then(function(endpoint) {
+    var clientId = 'close-' + pos.id.toString().slice(0,8) + '-' + Date.now();
+    var req = buildOrderBody(endpoint, pos.ticker, closeSide, contractCount, adjustedPrice, clientId);
+    return apiFetch(req.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
   }).then(function(d) {
-    log('Close API response: ' + JSON.stringify(d).substring(0, 120), 'b');
+    log('Close response [attempt ' + (_attempt+1) + ']: ' + JSON.stringify(d).substring(0, 120), 'b');
+
+    // ── Explicit error ────────────────────────────────────────────
     if (d && d.error) {
-      log('Close rejected: ' + JSON.stringify(d.error).substring(0, 80), 'r');
-      if (d.error.code === 'MARKET_NOT_FOUND' || d.error.code === 'market_not_found'
-       || d.error.code === 'not_found' || (d.error.message || '').includes('not found')) {
+      var errCode = (d.error.code || '').toLowerCase();
+      var errMsg  = (d.error.message || '').toLowerCase();
+
+      // Market already closed — go straight to settlement poll
+      if (errCode.includes('not_found') || errCode.includes('market_not_found') || errMsg.includes('not found')) {
         log('Market closed — polling for settlement', 'b');
         pollMarketResult(pos, 0);
+        return;
       }
+
+      // FOK couldn't fill — retry with a wider price (up to 3 times)
+      if (errCode.includes('order_not_filled') || errCode.includes('not_filled')
+       || errCode.includes('fill_or_kill') || errMsg.includes('fill or kill')
+       || errMsg.includes('not filled') || errMsg.includes('insufficient')) {
+        log('FOK not filled @ ' + adjustedPrice + 'c — retrying wider', 'a');
+        setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1000);
+        return;
+      }
+
+      // reduce_only rejected — means position may already be closed on Kalshi's side
+      if (errCode.includes('reduce_only') || errMsg.includes('reduce_only') || errMsg.includes('reduce only')) {
+        log('reduce_only rejected — position may already be flat on Kalshi, polling settlement', 'a');
+        pollMarketResult(pos, 0);
+        return;
+      }
+
+      // Any other error — don't settle, don't remove. Just log and let natural expiry handle it.
+      log('Close rejected (' + errCode + ') — leaving position open for natural settlement', 'a');
       return;
     }
-    if (d.order || d.order_id || (d && !d.error && !d.detail)) {
-      var entryCents   = pos.entryPriceCents || Math.round((pos.stake / Math.max(1, pos.contracts)) * 100);
-      var exitProceeds = (currentPriceCents / 100) * pos.contracts;
-      var netPnl       = exitProceeds * 0.99 - pos.stake;
-      var won          = netPnl > 0;
-      log('Early exit confirmed: entry ' + entryCents + 'c → exit ' + currentPriceCents + 'c | P&L: $' + netPnl.toFixed(2), won ? 'g' : 'r');
-      settlePosition(pos, won, netPnl);
-    } else {
-      log('Close order rejected: ' + JSON.stringify(d).substring(0,80) + ' — polling for natural settlement', 'r');
-      // Don't give up — poll the market for natural settlement
-      if (!pos._settled) pollMarketResult(pos, 0);
+
+    // ── Confirmed order placed ────────────────────────────────────
+    // Only settle if we got a real order object back — not just any non-error response
+    var orderId = d && (d.order_id || (d.order && d.order.order_id));
+    if (orderId) {
+      // Verify the close actually filled before settling — poll the close order
+      verifyCloseOrder(pos, orderId, currentPriceCents, 0);
+      return;
     }
-  }).catch(function(e) { log('Close error: ' + e.message, 'r'); });
+
+    // Ambiguous response — don't assume success, let natural settlement handle it
+    log('Close response ambiguous: ' + JSON.stringify(d).substring(0,80) + ' — not settling locally', 'a');
+
+  }).catch(function(e) {
+    log('Close network error: ' + e.message + ' — retrying', 'r');
+    setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 2000);
+  });
 }
 
+// Poll the close order to confirm it actually filled before settling
+function verifyCloseOrder(pos, closeOrderId, exitPriceCents, attempts) {
+  if (attempts > 8) {
+    log('Close order verification timeout — polling market settlement', 'a');
+    pollMarketResult(pos, 0);
+    return;
+  }
+  var delay = Math.min(10000, 1500 * Math.pow(1.5, attempts));
+  setTimeout(function() {
+    // Check position via /portfolio/positions — if our position is gone, the close filled
+    fetchPortfolioPositions().then(function(kps) {
+      var stillOpen = (kps || []).some(function(kp) {
+        return (kp.ticker || kp.market_ticker) === pos.ticker
+          && Math.abs(parseFloat(kp.position || 0)) > 0;
+      });
+      if (!stillOpen) {
+        // Position is gone from Kalshi — close filled successfully
+        var entryCents  = pos.entryPriceCents || 50;
+        var exitProceeds = (exitPriceCents / 100) * pos.contracts;
+        var netPnl       = exitProceeds * 0.99 - pos.stake;
+        var won          = netPnl > 0;
+        log('Close confirmed (position gone from Kalshi): entry ' + entryCents + 'c exit ' + exitPriceCents + 'c | P&L $' + netPnl.toFixed(2), won ? 'g' : 'r');
+        settlePosition(pos, won, netPnl);
+      } else {
+        // Position still showing — close may not have filled yet, retry
+        log('Close not yet reflected in positions — checking again (' + (attempts+1) + '/8)', 'b');
+        verifyCloseOrder(pos, closeOrderId, exitPriceCents, attempts + 1);
+      }
+    }).catch(function() {
+      verifyCloseOrder(pos, closeOrderId, exitPriceCents, attempts + 1);
+    });
+  }, delay);
+}
 function paperSettlePosition(pos) {
   if (!S.positions.some(function(p) { return p.id === pos.id; })) return;
   // Use the real Kalshi market result — same as live trades
@@ -5590,6 +5577,14 @@ function arm() {
   log('Spiral drive engaged - autonomous trading active', 'g');
   detectMarketRegime();
   log('All profitability systems online', 'g');
+  // Prefetch Binance candles for all symbols so RSI/MACD/velocity are ready immediately
+  log('Prefetching Binance candle data...', 'b');
+  Promise.all(['BTC','ETH','SOL','XRP','DOGE'].map(function(sym) {
+    _candleLastFetch[sym] = 0; // force refresh
+    return refreshCandles(sym);
+  })).then(function() {
+    log('Candle data ready — indicators warm', 'g');
+  });
   // rediscover API endpoints every arm in case Kalshi updated
   KALSHI_ENDPOINT_CHECKED = false;
   KALSHI_ORDER_ENDPOINT = null;
