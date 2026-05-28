@@ -1623,6 +1623,17 @@ MIIEowIBAAKCAQEA...
 </div>
 <script>
 var PROXY = 'http://localhost:3456';
+
+// ── Market intelligence data store — declared first so all functions can access it
+var MARKET_INTEL = {
+  fearGreed:     null,
+  fundingRates:  {},
+  ivData:        null,
+  recentTrades:  {},
+  recentFills:   {},
+  tradeHistory:  [],
+  sessionSignals: []
+};
 var S = {
   armed: false,
   haltNewTrades: false, // stops new trades but keeps monitoring open positions cash: 0, portfolio: 0, startPortfolio: 0,
@@ -2026,17 +2037,6 @@ function renderPositions() {
       }).join('')
     + '</tbody></table>';
 }
-
-// ── Market intelligence data store ────────────────────────────────
-var MARKET_INTEL = {
-  fearGreed:     null,
-  fundingRates:  {},
-  ivData:        null,
-  recentTrades:  {},
-  recentFills:   {},
-  tradeHistory:  [],
-  sessionSignals: []
-};
 
 // ── Fractional Kelly ramp (protects small budgets early on) ─────────
 function getKellyRampFactor() {
@@ -6515,6 +6515,7 @@ function updatePerformanceSummary() {
 }
 
 function getBestHour() {
+  if (!MARKET_INTEL) return null;
   var hist = MARKET_INTEL.tradeHistory || [];
   if (hist.length < 3) return null;
   var hours = {};
