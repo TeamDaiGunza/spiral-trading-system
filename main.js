@@ -149,11 +149,11 @@ const server = http.createServer(async (req, res) => {
     catch { res.writeHead(500); return res.end('mobile.html not found'); }
   }
 
-  // ── Binance public proxy (no auth — bypasses CORS in renderer) ──────
-  if (reqPath.startsWith('/binance/')) {
-    const binancePath = reqPath.slice('/binance'.length) + (parsed.search || '');
+  // ── Coinbase public market data proxy (replaces Binance — US-accessible) ──
+  if (reqPath.startsWith('/coinbase/')) {
+    const coinbasePath = reqPath.slice('/coinbase'.length) + (parsed.search || '');
     try {
-      const r = await httpsReq({ hostname: 'api.binance.com', path: binancePath, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const r = await httpsReq({ hostname: 'api.coinbase.com', path: coinbasePath, method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } });
       jsonResp(res, r.status, r.body);
     } catch (e) { jsonResp(res, 500, { error: e.message }); }
     return;

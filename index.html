@@ -2516,7 +2516,11 @@ var LIVE_PRICES = { BTC: null, ETH: null, SOL: null, XRP: null, DOGE: null, last
 var PRICE_HISTORY = { BTC: [], ETH: [], SOL: [], XRP: [], DOGE: [] };
 
 // ── Binance symbol map ────────────────────────────────────────────
-var BINANCE_SYM = { BTC:'BTCUSDT', ETH:'ETHUSDT', SOL:'SOLUSDT', XRP:'XRPUSDT', DOGE:'DOGEUSDT' };
+// Coinbase Advanced API — US-accessible, no auth needed for public market data
+// Binance blocks US IPs (451), Coinbase is the replacement
+var COINBASE_SYM = { BTC:'BTC-USD', ETH:'ETH-USD', SOL:'SOL-USD', XRP:'XRP-USD', DOGE:'DOGE-USD' };
+// Coinbase granularity in seconds: 60=1m, 300=5m, 900=15m
+var COINBASE_GRAN = { '1m': 60, '5m': 300, '15m': 900 };
 
 // CANDLE_HISTORY[sym][interval] = [{t,o,h,l,c,v}, ...]
 var CANDLE_HISTORY = {};
@@ -2545,27 +2549,38 @@ function getPriceVelocity(sym) {
   return ((latest.p - old.p) / old.p) * 100;
 }
 
-// Fetch Binance klines — free public endpoint, no auth needed
+// Fetch candles from Coinbase Advanced API — US-accessible, no auth needed
 // interval: '1m','5m','15m' | limit: number of candles
 function fetchBinanceCandles(sym, interval, limit) {
-  var bsym = BINANCE_SYM[sym];
-  if (!bsym) return Promise.resolve(null);
-  // Route through local proxy to avoid CORS — proxy forwards to api.binance.com
-  var url = PROXY + '/binance/api/v3/klines?symbol=' + bsym
-          + '&interval=' + interval + '&limit=' + limit;
+  // Function name kept for compatibility — now uses Coinbase instead of Binance
+  var csym = COINBASE_SYM[sym];
+  var gran = COINBASE_GRAN[interval] || 60;
+  if (!csym) return Promise.resolve(null);
+  // Coinbase candles: GET /api/v3/brokerage/market/products/{product_id}/candles
+  // ?granularity=ONE_MINUTE|FIVE_MINUTE|FIFTEEN_MINUTE&start=&end=
+  var granMap = { 60: 'ONE_MINUTE', 300: 'FIVE_MINUTE', 900: 'FIFTEEN_MINUTE' };
+  var granName = granMap[gran] || 'ONE_MINUTE';
+  var end = Math.floor(Date.now() / 1000);
+  var start = end - (gran * limit);
+  // Route through proxy to avoid CORS
+  var url = PROXY + '/coinbase/api/v3/brokerage/market/products/' + csym
+          + '/candles?granularity=' + granName
+          + '&start=' + start + '&end=' + end;
   return fetch(url)
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      if (!Array.isArray(data) || !data.length) return null;
-      // Binance kline: [openTime, open, high, low, close, volume, ...]
-      var candles = data.map(function(k) {
+      var raw = data.candles || data;
+      if (!Array.isArray(raw) || !raw.length) return null;
+      // Coinbase candle: {start, low, high, open, close, volume}
+      // They come newest-first, so reverse to get chronological order
+      var candles = raw.slice().reverse().map(function(k) {
         return {
-          t: k[0],
-          o: parseFloat(k[1]),
-          h: parseFloat(k[2]),
-          l: parseFloat(k[3]),
-          c: parseFloat(k[4]),
-          v: parseFloat(k[5])
+          t: parseFloat(k.start) * 1000,
+          o: parseFloat(k.open),
+          h: parseFloat(k.high),
+          l: parseFloat(k.low),
+          c: parseFloat(k.close),
+          v: parseFloat(k.volume)
         };
       });
       if (!CANDLE_HISTORY[sym]) CANDLE_HISTORY[sym] = {};
