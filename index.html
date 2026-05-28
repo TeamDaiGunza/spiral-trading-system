@@ -2590,33 +2590,47 @@ function fetchBinanceCandles(sym, interval, limit) {
     .catch(function() { return null; });
 }
 
-// Refresh candles for a single symbol — 1m (30 candles = 30min history) and 5m (30 candles = 2.5hr)
+// Refresh candles — staggered to avoid 429s on Coinbase
+// Only fetches 1m (most critical for indicators) and 5m per symbol
 var _candleLastFetch = {};
+var _candleQueue = []; // sequential queue to avoid burst rate limiting
+var _candleQueueRunning = false;
+
+function _drainCandleQueue() {
+  if (_candleQueueRunning || !_candleQueue.length) return;
+  _candleQueueRunning = true;
+  var item = _candleQueue.shift();
+  fetchBinanceCandles(item.sym, item.interval, item.limit)
+    .then(function(candles) {
+      if (candles && candles.length) {
+        if (item.interval === '1m') {
+          INDICATOR_HISTORY[item.sym] = candles.map(function(k) {
+            return { price: k.c, vol: k.v, ts: k.t };
+          });
+          PRICE_HISTORY[item.sym] = candles.slice(-20).map(function(k) {
+            return { t: k.t, p: k.c };
+          });
+        }
+      }
+    })
+    .catch(function() {})
+    .then(function() {
+      _candleQueueRunning = false;
+      // 700ms between calls to stay under Coinbase rate limit
+      setTimeout(_drainCandleQueue, 700);
+    });
+}
+
 function refreshCandles(sym) {
   var now = Date.now();
   var last = _candleLastFetch[sym] || 0;
-  if (now - last < 55000) return Promise.resolve(); // don't re-fetch within 55s
+  if (now - last < 55000) return Promise.resolve();
   _candleLastFetch[sym] = now;
-  return Promise.all([
-    fetchBinanceCandles(sym, '1m', 35),   // 35 x 1m = enough for RSI(14) immediately
-    fetchBinanceCandles(sym, '5m', 30),   // 30 x 5m = 2.5hr context
-    fetchBinanceCandles(sym, '15m', 20)   // 20 x 15m = 5hr context
-  ]).then(function(results) {
-    // Feed 1m closes+volumes into INDICATOR_HISTORY so RSI/MACD get real candle data
-    var c1m = results[0];
-    if (c1m && c1m.length) {
-      // Replace INDICATOR_HISTORY for this sym with candle-based data
-      INDICATOR_HISTORY[sym] = c1m.map(function(k) {
-        return { price: k.c, vol: k.v, ts: k.t };
-      });
-    }
-    // Update PRICE_HISTORY from 1m candles too
-    if (c1m && c1m.length) {
-      PRICE_HISTORY[sym] = c1m.slice(-20).map(function(k) {
-        return { t: k.t, p: k.c };
-      });
-    }
-  });
+  // Queue 1m and 5m fetches — processed sequentially
+  _candleQueue.push({ sym: sym, interval: '1m', limit: 35 });
+  _candleQueue.push({ sym: sym, interval: '5m', limit: 30 });
+  _drainCandleQueue();
+  return Promise.resolve();
 }
 
 // Get short-term change from candles
@@ -2640,6 +2654,37 @@ function getCandleATR(sym, period) {
     trs.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
   }
   return trs.reduce(function(a,b){return a+b;},0) / trs.length;
+}
+
+function fetchFearGreed() {
+  // Alternative.me Fear & Greed index — free, no auth, CORS-friendly
+  return fetch('https://api.alternative.me/fng/?limit=1')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var item = d.data && d.data[0];
+      if (item) {
+        MARKET_INTEL.fearGreed = {
+          value: parseInt(item.value),
+          label: item.value_classification
+        };
+        // Update display
+        var fgEl = document.getElementById('fgDisplay');
+        var fgLb = document.getElementById('fgLabel');
+        if (fgEl) fgEl.textContent = item.value;
+        if (fgLb) fgLb.textContent = item.value_classification;
+      }
+      return MARKET_INTEL.fearGreed;
+    }).catch(function() { return null; });
+}
+
+function fetchFundingRates() {
+  // Use Coinbase for BTC price momentum as a funding rate proxy
+  // Real funding rates require exchange auth — use 1h price change as signal instead
+  ['BTC','ETH'].forEach(function(sym) {
+    var vel = getPriceVelocity(sym);
+    if (vel !== null) MARKET_INTEL.fundingRates[sym] = vel / 100; // normalize to rate format
+  });
+  return Promise.resolve(MARKET_INTEL.fundingRates);
 }
 
 function fetchLivePrices() {
