@@ -3485,34 +3485,45 @@ function runCycle() {
               recordPrediction(pos, conf, qEdge ? qEdge.edge : 0);
               drawPredictionChart();
 
-              // Retry fill fetch — Kalshi may not have processed it yet
-              function tryGetFill(attempts) {
-                fetchPortfolioFill(pos.id).then(function(fill) {
-                  if (fill && fill.contracts > 0) {
-                    log('Fill confirmed: ' + fill.contracts + ' @ ' + fill.avgPriceCents + 'c = $' + fill.totalCost.toFixed(2), 'g');
-                    pos.contracts       = fill.contracts;
-                    pos.entryPriceCents = fill.avgPriceCents;
-                    pos.stake           = fill.totalCost;
-                    pos.fillStatus      = 'filled';
-                    renderPositions(); updateMetrics();
-                  } else if (attempts < 5) {
-                    // Retry with backoff: 2s, 4s, 8s, 16s, 30s
-                    var delay = Math.min(30000, 2000 * Math.pow(2, attempts));
-                    log('Fill pending — retrying in ' + (delay/1000) + 's (attempt ' + (attempts+1) + '/5)', 'b');
-                    setTimeout(function() { tryGetFill(attempts + 1); }, delay);
+              // Reconcile actual fill data from /portfolio/positions — same source Kalshi UI uses
+              // /portfolio/fills?order_id= filter is not reliably supported; positions is ground truth
+              function reconcileFromPositions(attempts) {
+                fetchPortfolioPositions().then(function(kalshiPositions) {
+                  var kp = (kalshiPositions || []).find(function(p) {
+                    return (p.ticker || p.market_ticker) === pos.ticker;
+                  });
+                  if (kp) {
+                    var realContracts = Math.abs(parseFloat(kp.position || kp.quantity || 0));
+                    var realCostCents = parseFloat(kp.market_exposure_cents || kp.cost_cents || 0);
+                    var realCost      = realCostCents / 100;
+                    if (realContracts > 0 && realCost > 0) {
+                      var realAvgCents = Math.round(realCostCents / realContracts);
+                      log('Position reconciled from Kalshi: ' + realContracts + ' contracts @ ' + realAvgCents + 'c = $' + realCost.toFixed(2) + ' (was $' + pos.stake.toFixed(2) + ')', 'g');
+                      pos.contracts       = realContracts;
+                      pos.entryPriceCents = realAvgCents;
+                      pos.stake           = realCost;
+                      pos.fillStatus      = 'filled';
+                      renderPositions(); updateMetrics();
+                      return;
+                    }
+                  }
+                  // Position not showing yet — retry with backoff
+                  if (attempts < 6) {
+                    var delay = Math.min(30000, 1500 * Math.pow(2, attempts));
+                    log('Position not visible yet — retrying in ' + (delay/1000).toFixed(0) + 's (attempt ' + (attempts+1) + '/6)', 'b');
+                    setTimeout(function() { reconcileFromPositions(attempts + 1); }, delay);
                   } else {
-                    // After 5 retries, use estimate but flag it
-                    log('Fill data unavailable — using estimate: ' + count + ' @ ' + price + 'c = $' + actualCost, 'a');
+                    log('Could not reconcile fill — using estimate: ' + count + ' @ ' + price + 'c = $' + actualCost, 'a');
                     pos.fillStatus = 'filled';
                     renderPositions(); updateMetrics();
                   }
                 }).catch(function() {
-                  if (attempts < 3) setTimeout(function() { tryGetFill(attempts + 1); }, 3000);
+                  if (attempts < 3) setTimeout(function() { reconcileFromPositions(attempts + 1); }, 3000);
                   else { pos.fillStatus = 'filled'; renderPositions(); }
                 });
               }
-              // Wait 1.5s before first attempt — gives Kalshi time to process
-              setTimeout(function() { tryGetFill(0); }, 1500);
+              // Wait 2s before first attempt — Kalshi needs a moment to register the fill
+              setTimeout(function() { reconcileFromPositions(0); }, 2000);
 
               startTakeProfitWatch(pos, price);
               startMomentumWatch(pos, price);
@@ -4887,21 +4898,23 @@ function pollPosition(pos, attempts) {
       // 404 = order filled and moved to history — go straight to fills check
       if (!d || d.code === 'not_found' || (d.error && d.error.code === 'not_found')
           || (typeof d.detail === 'string' && d.detail.includes('not found'))) {
-        log('Order ' + pos.id.substring(0,8) + '... moved to history — checking fills', 'b');
-        return fetchPortfolioFill(pos.id).then(function(fill) {
-          if (fill) {
-            pos.contracts    = fill.contracts;
-            pos.entryPriceCents = fill.avgPriceCents;
-            pos.stake        = fill.totalCost;
-            pos.fillStatus   = 'filled';
-            renderPositions();
-            pollMarketResult(pos, 0);
-          } else {
-            log('No fill found for ' + pos.id.substring(0,8) + '... — removing', 'a');
-            S.positions = S.positions.filter(function(p){ return p.id !== pos.id; });
-            pos._settled = true;
-            renderPositions(); updateMetrics(); fetchBalance();
+        log('Order ' + pos.id.substring(0,8) + '... filled — reconciling from positions', 'b');
+        return fetchPortfolioPositions().then(function(kps) {
+          var kp = (kps||[]).find(function(p){ return (p.ticker||p.market_ticker) === pos.ticker; });
+          if (kp) {
+            var rc = Math.abs(parseFloat(kp.position||0)), rx = parseFloat(kp.market_exposure_cents||0)/100;
+            if (rc > 0 && rx > 0) {
+              pos.contracts = rc; pos.stake = rx;
+              pos.entryPriceCents = Math.round((kp.market_exposure_cents||0)/rc);
+            }
           }
+          pos.fillStatus = 'filled';
+          renderPositions();
+          pollMarketResult(pos, 0);
+        }).catch(function() {
+          pos.fillStatus = 'filled';
+          renderPositions();
+          pollMarketResult(pos, 0);
         });
       }
       var order = d.order || d;
@@ -4936,26 +4949,30 @@ function pollPosition(pos, attempts) {
         return;
       }
 
-      // 404 or unknown status — order moved to fills history (means it filled)
-      // Verify via portfolio fills before assuming filled
-      fetchPortfolioFill(pos.id).then(function(fill) {
-        if (fill && fill.contracts > 0) {
-          pos.contracts = fill.contracts;
-          pos.entryPriceCents = fill.avgPriceCents;
-          pos.stake = fill.totalCost;
-          pos.fillStatus = 'filled';
-          renderPositions();
-          log('Fill confirmed via portfolio: ' + fill.contracts + ' contracts @ ' + fill.avgPriceCents + 'c', 'b');
-          pollMarketResult(pos, 0);
-        } else {
-          // No fill found anywhere — order likely rejected
-          log('Order ' + pos.id + ' not found in fills — assuming rejected, removing', 'a');
-          pos._settled = true;
-          S.exposure = Math.max(0, S.exposure - pos.stake);
-          S.positions = S.positions.filter(function(p) { return p.id !== pos.id; });
-          setTimeout(fetchBalance, 1000);
-          renderPositions(); updateMetrics();
+      // Unknown status — treat as filled, reconcile from positions
+      fetchPortfolioPositions().then(function(kps) {
+        var kp = (kps||[]).find(function(p){ return (p.ticker||p.market_ticker) === pos.ticker; });
+        if (kp) {
+          var rc = Math.abs(parseFloat(kp.position||0)), rx = parseFloat(kp.market_exposure_cents||0)/100;
+          if (rc > 0 && rx > 0) {
+            pos.contracts = rc; pos.stake = rx;
+            pos.entryPriceCents = Math.round((kp.market_exposure_cents||0)/rc);
+            pos.fillStatus = 'filled';
+            log('Fill reconciled via positions: ' + rc + ' contracts @ $' + rx.toFixed(2), 'b');
+            renderPositions();
+            pollMarketResult(pos, 0);
+            return;
+          }
         }
+        // Position not found — order was likely rejected
+        log('Order ' + pos.id + ' not in positions — assuming rejected, removing', 'a');
+        pos._settled = true;
+        S.exposure = Math.max(0, S.exposure - pos.stake);
+        S.positions = S.positions.filter(function(p) { return p.id !== pos.id; });
+        setTimeout(fetchBalance, 1000);
+        renderPositions(); updateMetrics();
+      }).catch(function() {
+        pos.fillStatus = 'filled'; renderPositions(); pollMarketResult(pos, 0);
       });
     })
     .catch(function() {
@@ -5242,18 +5259,26 @@ function forceRunCycle() {
               ticker: mkt.ticker
             };
             S.positions.push(pos);
-            log('PTH order confirmed: ' + pos.id + ' — fetching fill...', 'g');
-            setTimeout(function() {
-              fetchPortfolioFill(pos.id).then(function(fill) {
-                if (fill && fill.contracts > 0) {
-                  pos.contracts = fill.contracts;
-                  pos.entryPriceCents = fill.avgPriceCents;
-                  pos.stake = fill.totalCost;
-                  pos.fillStatus = 'filled';
-                  renderPositions(); updateMetrics();
-                }
-              });
-            }, 1500);
+            log('PTH order confirmed: ' + pos.id + ' — reconciling fill from positions...', 'g');
+            (function reconcilePTH(attempts) {
+              setTimeout(function() {
+                fetchPortfolioPositions().then(function(kps) {
+                  var kp = (kps||[]).find(function(p){ return (p.ticker||p.market_ticker) === pos.ticker; });
+                  if (kp) {
+                    var rc = Math.abs(parseFloat(kp.position||0)), rx = parseFloat(kp.market_exposure_cents||0)/100;
+                    if (rc > 0 && rx > 0) {
+                      pos.contracts = rc; pos.stake = rx;
+                      pos.entryPriceCents = Math.round((kp.market_exposure_cents||0)/rc);
+                      pos.fillStatus = 'filled';
+                      log('PTH fill reconciled: ' + rc + ' contracts @ $' + rx.toFixed(2), 'g');
+                      renderPositions(); updateMetrics(); return;
+                    }
+                  }
+                  if (attempts < 5) reconcilePTH(attempts + 1);
+                  else { pos.fillStatus = 'filled'; renderPositions(); }
+                }).catch(function(){ if (attempts < 3) reconcilePTH(attempts+1); else { pos.fillStatus='filled'; renderPositions(); } });
+              }, Math.min(30000, 2000 * Math.pow(2, attempts)));
+            })(0);
             startTakeProfitWatch(pos, price);
             startMomentumWatch(pos, price);
             pollPosition(pos, 0);
@@ -5390,18 +5415,26 @@ function opportunityScanner() {
               dir: signal.direction, stake: parseFloat(actual), contracts: count,
               status: 'open', pnl: null, ticker: mkt.ticker };
             S.positions.push(pos);
-            log('Opp order confirmed: ' + pos.id + ' — fetching fill...', 'g');
-            setTimeout(function() {
-              fetchPortfolioFill(pos.id).then(function(fill) {
-                if (fill && fill.contracts > 0) {
-                  pos.contracts = fill.contracts;
-                  pos.entryPriceCents = fill.avgPriceCents;
-                  pos.stake = fill.totalCost;
-                  pos.fillStatus = 'filled';
-                  renderPositions(); updateMetrics();
-                }
-              });
-            }, 1500);
+            log('Opp order confirmed: ' + pos.id + ' — reconciling fill from positions...', 'g');
+            (function reconcileOpp(attempts) {
+              setTimeout(function() {
+                fetchPortfolioPositions().then(function(kps) {
+                  var kp = (kps||[]).find(function(p){ return (p.ticker||p.market_ticker) === pos.ticker; });
+                  if (kp) {
+                    var rc = Math.abs(parseFloat(kp.position||0)), rx = parseFloat(kp.market_exposure_cents||0)/100;
+                    if (rc > 0 && rx > 0) {
+                      pos.contracts = rc; pos.stake = rx;
+                      pos.entryPriceCents = Math.round((kp.market_exposure_cents||0)/rc);
+                      pos.fillStatus = 'filled';
+                      log('Opp fill reconciled: ' + rc + ' contracts @ $' + rx.toFixed(2), 'g');
+                      renderPositions(); updateMetrics(); return;
+                    }
+                  }
+                  if (attempts < 5) reconcileOpp(attempts + 1);
+                  else { pos.fillStatus = 'filled'; renderPositions(); }
+                }).catch(function(){ if (attempts < 3) reconcileOpp(attempts+1); else { pos.fillStatus='filled'; renderPositions(); } });
+              }, Math.min(30000, 2000 * Math.pow(2, attempts)));
+            })(0);
             startTakeProfitWatch(pos, price);
             startMomentumWatch(pos, price);
             pollPosition(pos, 0);
