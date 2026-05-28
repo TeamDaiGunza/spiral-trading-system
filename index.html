@@ -3468,23 +3468,34 @@ function runCycle() {
               recordPrediction(pos, conf, qEdge ? qEdge.edge : 0);
               drawPredictionChart();
 
-              // Fetch actual fill price/contracts from Kalshi — replace estimates
-              fetchPortfolioFill(pos.id).then(function(fill) {
-                if (fill && fill.contracts > 0) {
-                  log('Fill confirmed: ' + fill.contracts + ' contracts @ ' + fill.avgPriceCents + 'c (cost $' + fill.totalCost.toFixed(2) + ')', 'g');
-                  pos.contracts      = fill.contracts;
-                  pos.entryPriceCents = fill.avgPriceCents;
-                  pos.stake          = fill.totalCost; // use real cost, not estimate
-                  pos.fillStatus     = 'filled';
-                } else {
-                  log('Fill data pending — using estimate (' + count + ' contracts @ ' + price + 'c)', 'b');
-                  pos.fillStatus = 'filled'; // assume filled since order was accepted
-                }
-                renderPositions();
-              }).catch(function() {
-                pos.fillStatus = 'filled';
-                renderPositions();
-              });
+              // Retry fill fetch — Kalshi may not have processed it yet
+              function tryGetFill(attempts) {
+                fetchPortfolioFill(pos.id).then(function(fill) {
+                  if (fill && fill.contracts > 0) {
+                    log('Fill confirmed: ' + fill.contracts + ' @ ' + fill.avgPriceCents + 'c = $' + fill.totalCost.toFixed(2), 'g');
+                    pos.contracts       = fill.contracts;
+                    pos.entryPriceCents = fill.avgPriceCents;
+                    pos.stake           = fill.totalCost;
+                    pos.fillStatus      = 'filled';
+                    renderPositions(); updateMetrics();
+                  } else if (attempts < 5) {
+                    // Retry with backoff: 2s, 4s, 8s, 16s, 30s
+                    var delay = Math.min(30000, 2000 * Math.pow(2, attempts));
+                    log('Fill pending — retrying in ' + (delay/1000) + 's (attempt ' + (attempts+1) + '/5)', 'b');
+                    setTimeout(function() { tryGetFill(attempts + 1); }, delay);
+                  } else {
+                    // After 5 retries, use estimate but flag it
+                    log('Fill data unavailable — using estimate: ' + count + ' @ ' + price + 'c = $' + actualCost, 'a');
+                    pos.fillStatus = 'filled';
+                    renderPositions(); updateMetrics();
+                  }
+                }).catch(function() {
+                  if (attempts < 3) setTimeout(function() { tryGetFill(attempts + 1); }, 3000);
+                  else { pos.fillStatus = 'filled'; renderPositions(); }
+                });
+              }
+              // Wait 1.5s before first attempt — gives Kalshi time to process
+              setTimeout(function() { tryGetFill(0); }, 1500);
 
               startTakeProfitWatch(pos, price);
               startMomentumWatch(pos, price);
@@ -5215,7 +5226,18 @@ function forceRunCycle() {
               ticker: mkt.ticker
             };
             S.positions.push(pos);
-            log('Force order confirmed: ' + pos.id, 'g');
+            log('PTH order confirmed: ' + pos.id + ' — fetching fill...', 'g');
+            setTimeout(function() {
+              fetchPortfolioFill(pos.id).then(function(fill) {
+                if (fill && fill.contracts > 0) {
+                  pos.contracts = fill.contracts;
+                  pos.entryPriceCents = fill.avgPriceCents;
+                  pos.stake = fill.totalCost;
+                  pos.fillStatus = 'filled';
+                  renderPositions(); updateMetrics();
+                }
+              });
+            }, 1500);
             startTakeProfitWatch(pos, price);
             startMomentumWatch(pos, price);
             pollPosition(pos, 0);
@@ -5352,7 +5374,18 @@ function opportunityScanner() {
               dir: signal.direction, stake: parseFloat(actual), contracts: count,
               status: 'open', pnl: null, ticker: mkt.ticker };
             S.positions.push(pos);
-            log('Opp order confirmed: ' + pos.id, 'g');
+            log('Opp order confirmed: ' + pos.id + ' — fetching fill...', 'g');
+            setTimeout(function() {
+              fetchPortfolioFill(pos.id).then(function(fill) {
+                if (fill && fill.contracts > 0) {
+                  pos.contracts = fill.contracts;
+                  pos.entryPriceCents = fill.avgPriceCents;
+                  pos.stake = fill.totalCost;
+                  pos.fillStatus = 'filled';
+                  renderPositions(); updateMetrics();
+                }
+              });
+            }, 1500);
             startTakeProfitWatch(pos, price);
             startMomentumWatch(pos, price);
             pollPosition(pos, 0);
