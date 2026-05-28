@@ -2434,12 +2434,24 @@ function getPriceVelocity(sym) {
   return ((latest.p - old.p) / old.p) * 100;
 }
 
+// ── Market intelligence data store ────────────────────────────────
+var MARKET_INTEL = {
+  fearGreed:     null,
+  fundingRates:  {},
+  ivData:        null,
+  recentTrades:  {},
+  recentFills:   {},
+  tradeHistory:  [],
+  sessionSignals: []
+};
+
 // Fetch Binance klines — free public endpoint, no auth needed
 // interval: '1m','5m','15m' | limit: number of candles
 function fetchBinanceCandles(sym, interval, limit) {
   var bsym = BINANCE_SYM[sym];
   if (!bsym) return Promise.resolve(null);
-  var url = 'https://api.binance.com/api/v3/klines?symbol=' + bsym
+  // Route through local proxy to avoid CORS — proxy forwards to api.binance.com
+  var url = PROXY + '/binance/api/v3/klines?symbol=' + bsym
           + '&interval=' + interval + '&limit=' + limit;
   return fetch(url)
     .then(function(r) { return r.json(); })
