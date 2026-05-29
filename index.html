@@ -3493,8 +3493,8 @@ function runCycle() {
                         : assetCode === 'XRP' ? 'XRP' : assetCode === 'DOGE' ? 'DOGE' : 'BTC');
         var ldP2 = LIVE_PRICES[candleSymP2] || {};
         var prompt2 = 'You are an independent Kalshi trader. Analyze this market from scratch.\n'
-          + 'Market: "' + mktTitle + '" | YES costs: ' + yesPrice + 'c per contract\n'
-          + 'If YES wins: you collect $1.00 per contract. If NO: you lose the ' + yesPrice + 'c cost.\n'
+          + 'Market: "' + mktTitle + '" | YES costs: ' + yesPrice + 'c | NO costs: ' + (100 - yesPrice) + 'c per contract\n'
+          + 'YES wins = YES holder collects $1.00/contract. NO wins = NO holder collects $1.00/contract.\n'
           + '\n=== RAW MARKET DATA ==='
           + '\nOrderbook: ' + (ob ? orderbookSummary(ob) : 'unavailable')
           + '\nRecent trade flow: ' + tradeFlowContext(mkt.ticker)
@@ -3569,6 +3569,10 @@ function runCycle() {
           if (stake > S.cash) { log('Insufficient funds ($' + S.cash.toFixed(2) + ')', 'r'); updateAll(); return; }
 
           addSignal(dir, mktTitle.substring(0, 28), stake, signal.reason || 'AI confirmed', conf, mkt.ticker);
+          // Hard direction assertion — triple check before firing
+          if (dir !== 'yes' && dir !== 'no') {
+            log('ORDER BLOCKED: invalid direction "' + dir + '"', 'r'); updateAll(); return;
+          }
           // price = what you pay per contract
           // YES bet: pay yesPrice cents per contract
           // NO bet: pay (100 - yesPrice) cents per contract
@@ -4824,8 +4828,8 @@ function closePosition(pos, currentPriceCents, _attempt) {
   if (!S.positions.some(function(p) { return p.id === pos.id; })) {
     log('CLOSE SKIP: position not in active list', 'b'); return;
   }
-  if (_attempt > 4) {
-    log('Close failed after ' + _attempt + ' attempts — falling back to natural settlement', 'a');
+  if (_attempt > 6) {
+    log('CLOSE GAVE UP after ' + _attempt + ' attempts — falling back to natural settlement', 'r');
     pollMarketResult(pos, 0);
     return;
   }
@@ -4836,68 +4840,142 @@ function closePosition(pos, currentPriceCents, _attempt) {
     return;
   }
 
-  // On Kalshi: to exit a position you SELL your existing contracts back
-  // action: 'sell', side: same side you originally bought
-  // yes_price: the current bid (what buyers will pay you)
-  var sellPrice = pos.dir === 'yes'
-    ? Math.max(1, currentPriceCents - _attempt)        // selling YES: accept current bid, widen down per retry
-    : Math.max(1, (100 - currentPriceCents) - _attempt); // selling NO: bid is (100 - yesBid)
+  // Fetch live market data to get the REAL current bid before placing sell
+  apiFetch(PROXY + '/kalshi/trade-api/v2/markets/' + pos.ticker).then(function(md) {
+    var mkt = md.market || md;
 
-  // yes_price for the API is always the YES side price
-  var yesPriceForApi = pos.dir === 'yes' ? sellPrice : (100 - sellPrice);
-  yesPriceForApi = Math.min(99, Math.max(1, yesPriceForApi));
+    // Get live bid — this is what buyers will pay us for our contracts
+    var yesBid = Math.round(parseFloat(mkt.yes_bid_dollars || 0) * 100);
+    var noBid  = Math.round(parseFloat(mkt.no_bid_dollars  || 0) * 100);
 
-  var clientId = 'sell-' + pos.id.toString().slice(0, 8) + '-' + Date.now();
+    // Selling YES: we want the YES bid. Selling NO: we want the NO bid.
+    // Widen by 1c per attempt (accept slightly less) to guarantee fill
+    var liveBid = pos.dir === 'yes'
+      ? Math.max(1, yesBid - _attempt)
+      : Math.max(1, noBid  - _attempt);
 
-  log('Close attempt ' + (_attempt + 1) + ': SELL ' + pos.dir.toUpperCase()
-    + ' x' + contractCount + ' @ ' + sellPrice + 'c | ticker: ' + pos.ticker, 'b');
+    // yes_price in the API is always expressed as the YES side price
+    // sell YES: yes_price = yesBid (what we accept for our YES contracts)
+    // sell NO:  yes_price = 100 - noBid (invert to get YES-side equivalent)
+    var yesPriceForApi = pos.dir === 'yes'
+      ? liveBid
+      : Math.max(1, 100 - noBid + _attempt); // widen upward for NO sells
 
-  apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/orders', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ticker:          pos.ticker,
-      client_order_id: clientId,
-      action:          'sell',
-      side:            pos.dir,
-      type:            'limit',
-      count:           contractCount,
-      yes_price:       yesPriceForApi
-    })
-  }).then(function(d) {
-    log('Close response: ' + JSON.stringify(d).substring(0, 150), 'b');
+    yesPriceForApi = Math.min(99, Math.max(1, yesPriceForApi));
 
-    if (d && d.error) {
-      var code = (d.error.code || d.error.message || '').toLowerCase();
-      if (code.includes('not_found') || code.includes('market_not_found')) {
-        log('Market already closed — polling settlement', 'b');
-        pollMarketResult(pos, 0);
+    var clientId = 'sell-' + pos.id.toString().slice(0, 8) + '-' + Date.now();
+
+    log('CLOSE attempt ' + (_attempt + 1) + ': SELL ' + pos.dir.toUpperCase()
+      + ' x' + contractCount
+      + ' | yesBid=' + yesBid + 'c noBid=' + noBid + 'c'
+      + ' | yes_price=' + yesPriceForApi + 'c'
+      + ' | yes_price=' + yesPriceForApi + 'c', 'b');
+
+    apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticker:          pos.ticker,
+        client_order_id: clientId,
+        action:          'sell',
+        side:            pos.dir,
+        type:            'limit',
+        count:           contractCount,
+        yes_price:       yesPriceForApi
+      })
+    }).then(function(d) {
+      log('CLOSE response [attempt ' + (_attempt+1) + ']: ' + JSON.stringify(d).substring(0, 300), 'b');
+
+      if (d && (d.error || d.code || d.message)) {
+        var errObj = d.error || d;
+        var code = ((errObj.code || '') + ' ' + (errObj.message || '')).toLowerCase();
+        log('CLOSE error: code=' + (errObj.code||'?') + ' msg=' + (errObj.message||JSON.stringify(errObj)).substring(0,100), 'r');
+
+        if (code.includes('not_found') || code.includes('market_not_found')) {
+          log('Market closed — polling settlement', 'b');
+          pollMarketResult(pos, 0); return;
+        }
+        if (code.includes('not_enough') || code.includes('insufficient') || code.includes('no position') || code.includes('no contracts')) {
+          log('No contracts to sell — already closed on Kalshi', 'a');
+          pollMarketResult(pos, 0); return;
+        }
+        // Retry with 1s delay and wider price
+        log('CLOSE rejected — retrying in 1s (attempt ' + (_attempt + 2) + ')', 'a');
+        setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1000);
         return;
       }
-      if (code.includes('not_enough') || code.includes('insufficient') || code.includes('no position')) {
-        log('No contracts to sell — position may already be closed on Kalshi', 'a');
-        pollMarketResult(pos, 0);
+
+      // Kalshi returns keys in any case — normalize the order object
+      var rawOrder = d && (d.order || d.ORDER || d);
+      function getField(obj, key) {
+        // case-insensitive field lookup
+        if (!obj) return undefined;
+        if (obj[key] !== undefined) return obj[key];
+        var lower = key.toLowerCase();
+        var upper = key.toUpperCase();
+        if (obj[lower] !== undefined) return obj[lower];
+        if (obj[upper] !== undefined) return obj[upper];
+        return undefined;
+      }
+      var orderId = getField(rawOrder, 'order_id') || getField(rawOrder, 'id');
+      if (orderId) {
+        var fillCount    = parseFloat(getField(rawOrder, 'fill_count_fp')    || getField(rawOrder, 'fill_count')    || 0);
+        var initialCount = parseFloat(getField(rawOrder, 'initial_count_fp') || getField(rawOrder, 'initial_count') || 0);
+        var status       = (getField(rawOrder, 'status') || '').toLowerCase();
+
+        log('CLOSE order ' + orderId.substring(0,8) + ': status=' + status + ' fill=' + fillCount + '/' + initialCount, 'b');
+
+        // Only trust "fully filled" if status is executed AND fill matches initial
+        var fullyFilled = status === 'executed' && initialCount > 0 && fillCount >= initialCount;
+
+        if (fullyFilled) {
+          var yesPriceDollars = getField(rawOrder, 'yes_price_dollars') || getField(rawOrder, 'taker_fill_cost_dollars');
+          var sellPriceCents = yesPriceDollars
+            ? Math.round(parseFloat(yesPriceDollars) * 100)
+            : yesPriceForApi;
+          var proceeds = (sellPriceCents / 100) * fillCount;
+          var netPnl   = proceeds * 0.99 - pos.stake;
+          var won      = netPnl > 0;
+          log('CLOSE confirmed executed: ' + fillCount + ' contracts @ ' + sellPriceCents + 'c | P&L $' + netPnl.toFixed(2), won ? 'g' : 'r');
+          settlePosition(pos, won, netPnl);
+        } else {
+          // Order placed but not yet executed — verify via positions poll
+          log('CLOSE order placed (status=' + status + ') — verifying via positions...', 'g');
+          verifyCloseOrder(pos, orderId, currentPriceCents, 0);
+        }
         return;
       }
-      // Any other error — retry with wider price
-      log('Sell rejected (' + code + ') — retrying attempt ' + (_attempt + 1), 'a');
-      setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1500);
-      return;
-    }
 
-    var orderId = d && (d.order_id || (d.order && d.order.order_id));
-    if (orderId) {
-      log('Sell order placed: ' + orderId + ' — verifying fill...', 'g');
-      verifyCloseOrder(pos, orderId, currentPriceCents, 0);
-      return;
-    }
+      log('CLOSE response ambiguous: ' + JSON.stringify(d).substring(0,150) + ' — retrying in 1s', 'a');
+      setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1000);
 
-    log('Close response ambiguous — retrying', 'a');
-    setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1500);
+    }).catch(function(e) {
+      log('CLOSE order error: ' + e.message + ' — retrying in 1s', 'r');
+      setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1000);
+    });
 
   }).catch(function(e) {
-    log('Close network error: ' + e.message + ' — retrying', 'r');
-    setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 2000);
+    // Can't fetch market data — use passed-in price as fallback
+    log('CLOSE market fetch failed: ' + e.message + ' — using fallback price', 'a');
+    var fallbackYesPrice = pos.dir === 'yes'
+      ? Math.max(1, currentPriceCents - _attempt)
+      : Math.max(1, 100 - currentPriceCents - _attempt);
+    fallbackYesPrice = Math.min(99, Math.max(1, fallbackYesPrice));
+    var clientId = 'sell-' + pos.id.toString().slice(0, 8) + '-' + Date.now();
+    apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticker: pos.ticker, client_order_id: clientId,
+        action: 'sell', side: pos.dir, type: 'limit',
+        count: contractCount, yes_price: fallbackYesPrice
+      })
+    }).then(function(d) {
+      var orderId = d && (d.order_id || (d.order && d.order.order_id));
+      if (orderId) { verifyCloseOrder(pos, orderId, currentPriceCents, 0); return; }
+      if (d && d.error) { closePosition(pos, currentPriceCents, _attempt + 1); return; }
+      closePosition(pos, currentPriceCents, _attempt + 1);
+    }).catch(function() { setTimeout(function(){ closePosition(pos, currentPriceCents, _attempt + 1); }, 1000); });
   });
 }
 
