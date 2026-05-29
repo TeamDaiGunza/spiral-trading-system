@@ -2856,6 +2856,58 @@ function fetchPortfolioPositions() {
     }).catch(function() { return []; });
 }
 
+// Shared cache for /markets/trades — prevents duplicate calls and 429s
+var _tradesCache = {};
+var TRADES_CACHE_TTL = 30000;
+
+function fetchMarketTrades(ticker, limit) {
+  limit = limit || 50;
+  var cached = _tradesCache[ticker];
+  if (cached && (Date.now() - cached.ts) < TRADES_CACHE_TTL) {
+    return Promise.resolve(cached.trades);
+  }
+  return apiFetch(PROXY + '/kalshi/trade-api/v2/markets/trades?ticker=' + ticker + '&limit=' + limit)
+    .then(function(d) {
+      var trades = d.trades || d.fills || d.results || [];
+      _tradesCache[ticker] = { ts: Date.now(), trades: trades };
+      MARKET_INTEL.recentTrades[ticker] = trades;
+      return trades;
+    }).catch(function() {
+      return cached ? cached.trades : [];
+    });
+}
+
+function spreadTooWide(mkt) {
+  var bid = parseFloat(mkt.yes_bid_dollars || 0) * 100;
+  var ask = parseFloat(mkt.yes_ask_dollars || 0) * 100;
+  var spread = ask - bid;
+  return spread > 12; // skip markets with >12c spread — too expensive to cross
+}
+
+function correlatedPositionExists(series) {
+  // Never open if we already hold any position on this exact series
+  var cryptoSeries = ['KXBTC15M','KXETH15M','KXSOL15M','KXDOGE15M','KXBNB15M','KXBTCD'];
+  var isCrypto = cryptoSeries.indexOf(series) >= 0;
+  if (!isCrypto) return false;
+  // Block if we hold ANY open position in the same crypto series
+  return S.positions.some(function(p) {
+    if (p._settled) return false;
+    var posSeries = p.ticker ? p.ticker.replace(/-\d{4}-.*$/, '') : '';
+    return cryptoSeries.indexOf(posSeries) >= 0;
+  });
+}
+
+function toggleArmed() {
+  if (S.armed) disarm(); else arm();
+}
+
+function fetchRecentTrades(ticker) {
+  return fetchMarketTrades(ticker, 10).then(function(trades) {
+    MARKET_INTEL.recentTrades[ticker] = trades;
+    return trades;
+  });
+}
+
 function fetchFills(ticker) {
   if (!ticker) return Promise.resolve([]);
   // Use shared cache — same endpoint as fetchRecentTrades, avoids double 429s
@@ -4764,103 +4816,87 @@ function startMomentumWatch(pos, entryPrice) {
 function closePosition(pos, currentPriceCents, _attempt) {
   _attempt = _attempt || 0;
 
-  // Sanity checks
-  if (!pos || pos._settled) { log('CLOSE SKIP: position already settled', 'b'); return; }
-  if (!isFinite(currentPriceCents) || currentPriceCents <= 0) {
-    log('CLOSE BLOCKED: invalid exit price ' + currentPriceCents, 'r'); return;
-  }
-  if (currentPriceCents < 3) {
-    log('Position near worthless (' + currentPriceCents + 'c) — letting settle naturally', 'a');
-    return;
-  }
+  if (!pos || pos._settled) { log('CLOSE SKIP: already settled', 'b'); return; }
   if (!S.positions.some(function(p) { return p.id === pos.id; })) {
-    log('Position already removed — skipping close', 'b'); return;
+    log('CLOSE SKIP: position not in active list', 'b'); return;
   }
-  if (_attempt > 3) {
+  if (_attempt > 4) {
     log('Close failed after ' + _attempt + ' attempts — falling back to natural settlement', 'a');
     pollMarketResult(pos, 0);
     return;
   }
 
-  var closeSide     = pos.dir === 'yes' ? 'no' : 'yes';
-  // closePrice = cost per contract for the closing side
-  // Closing YES: we buy NO, NO costs (100 - currentYesBid)
-  // Closing NO:  we buy YES, YES costs currentYesBid
-  var closePrice = pos.dir === 'yes'
-    ? (100 - currentPriceCents)
-    : currentPriceCents;
   var contractCount = pos.contracts || Math.round(pos.stake / (Math.max(1, pos.entryPriceCents || 50) / 100));
+  if (!contractCount || contractCount < 1) {
+    log('CLOSE BLOCKED: invalid contract count ' + contractCount, 'r');
+    return;
+  }
 
-  // Widen by 1c per retry so we cross the spread on repeated attempts
-  // buildOrderBody adds another 2c on top — so attempt 0 = +2c, attempt 1 = +3c, etc.
-  var adjustedPrice = Math.min(97, Math.max(1, closePrice + _attempt));
+  // On Kalshi: to exit a position you SELL your existing contracts back
+  // action: 'sell', side: same side you originally bought
+  // yes_price: the current bid (what buyers will pay you)
+  var sellPrice = pos.dir === 'yes'
+    ? Math.max(1, currentPriceCents - _attempt)        // selling YES: accept current bid, widen down per retry
+    : Math.max(1, (100 - currentPriceCents) - _attempt); // selling NO: bid is (100 - yesBid)
 
-  log('Close attempt ' + (_attempt+1) + ': ' + pos.ticker + ' | ' + closeSide.toUpperCase()
-    + ' x' + contractCount + ' @ ' + adjustedPrice + 'c (close-side cost)', 'b');
+  // yes_price for the API is always the YES side price
+  var yesPriceForApi = pos.dir === 'yes' ? sellPrice : (100 - sellPrice);
+  yesPriceForApi = Math.min(99, Math.max(1, yesPriceForApi));
 
-  // Use the same endpoint/format as placeOrder — reduce_only and fill_or_kill
-  // cause 400 Bad Request on Kalshi's legacy endpoint
-  discoverOrderEndpoint().then(function(endpoint) {
-    var clientId = 'close-' + pos.id.toString().slice(0,8) + '-' + Date.now();
-    var req = buildOrderBody(endpoint, pos.ticker, closeSide, contractCount, adjustedPrice, clientId);
-    return apiFetch(req.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
+  var clientId = 'sell-' + pos.id.toString().slice(0, 8) + '-' + Date.now();
+
+  log('Close attempt ' + (_attempt + 1) + ': SELL ' + pos.dir.toUpperCase()
+    + ' x' + contractCount + ' @ ' + sellPrice + 'c | ticker: ' + pos.ticker, 'b');
+
+  apiFetch(PROXY + '/kalshi/trade-api/v2/portfolio/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ticker:          pos.ticker,
+      client_order_id: clientId,
+      action:          'sell',
+      side:            pos.dir,
+      type:            'limit',
+      count:           contractCount,
+      yes_price:       yesPriceForApi
+    })
   }).then(function(d) {
-    log('Close response [attempt ' + (_attempt+1) + ']: ' + JSON.stringify(d).substring(0, 120), 'b');
+    log('Close response: ' + JSON.stringify(d).substring(0, 150), 'b');
 
-    // ── Explicit error ────────────────────────────────────────────
     if (d && d.error) {
-      var errCode = (d.error.code || '').toLowerCase();
-      var errMsg  = (d.error.message || '').toLowerCase();
-
-      // Market already closed — go straight to settlement poll
-      if (errCode.includes('not_found') || errCode.includes('market_not_found') || errMsg.includes('not found')) {
-        log('Market closed — polling for settlement', 'b');
+      var code = (d.error.code || d.error.message || '').toLowerCase();
+      if (code.includes('not_found') || code.includes('market_not_found')) {
+        log('Market already closed — polling settlement', 'b');
         pollMarketResult(pos, 0);
         return;
       }
-
-      // FOK couldn't fill — retry with a wider price (up to 3 times)
-      if (errCode.includes('order_not_filled') || errCode.includes('not_filled')
-       || errCode.includes('fill_or_kill') || errMsg.includes('fill or kill')
-       || errMsg.includes('not filled') || errMsg.includes('insufficient')) {
-        log('FOK not filled @ ' + adjustedPrice + 'c — retrying wider', 'a');
-        setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1000);
-        return;
-      }
-
-      // reduce_only rejected — means position may already be closed on Kalshi's side
-      if (errCode.includes('reduce_only') || errMsg.includes('reduce_only') || errMsg.includes('reduce only')) {
-        log('reduce_only rejected — position may already be flat on Kalshi, polling settlement', 'a');
+      if (code.includes('not_enough') || code.includes('insufficient') || code.includes('no position')) {
+        log('No contracts to sell — position may already be closed on Kalshi', 'a');
         pollMarketResult(pos, 0);
         return;
       }
-
-      // Any other error — don't settle, don't remove. Just log and let natural expiry handle it.
-      log('Close rejected (' + errCode + ') — leaving position open for natural settlement', 'a');
+      // Any other error — retry with wider price
+      log('Sell rejected (' + code + ') — retrying attempt ' + (_attempt + 1), 'a');
+      setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1500);
       return;
     }
 
-    // ── Confirmed order placed ────────────────────────────────────
-    // Only settle if we got a real order object back — not just any non-error response
     var orderId = d && (d.order_id || (d.order && d.order.order_id));
     if (orderId) {
-      // Verify the close actually filled before settling — poll the close order
+      log('Sell order placed: ' + orderId + ' — verifying fill...', 'g');
       verifyCloseOrder(pos, orderId, currentPriceCents, 0);
       return;
     }
 
-    // Ambiguous response — don't assume success, let natural settlement handle it
-    log('Close response ambiguous: ' + JSON.stringify(d).substring(0,80) + ' — not settling locally', 'a');
+    log('Close response ambiguous — retrying', 'a');
+    setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 1500);
 
   }).catch(function(e) {
     log('Close network error: ' + e.message + ' — retrying', 'r');
     setTimeout(function() { closePosition(pos, currentPriceCents, _attempt + 1); }, 2000);
   });
 }
+
 
 // Poll the close order to confirm it actually filled before settling
 function verifyCloseOrder(pos, closeOrderId, exitPriceCents, attempts) {
@@ -5188,36 +5224,55 @@ function pollMarketResult(pos, attempts) {
       return;
     }
 
-    // Step 2: Market is settled — now verify via Kalshi portfolio/settlements
-    // This confirms we actually GOT paid, not just that the market resolved
+    // Step 2: Market resolved — verify position is actually settled on Kalshi
+    // before recording win/loss. Check /portfolio/positions:
+    // - If position is GONE → Kalshi has settled it (paid out or zeroed)
+    // - If position STILL EXISTS → not yet settled, wait and retry
     var won = (pos.dir === result);
-    log('Market resolved: ' + result.toUpperCase() + ' | our bet: ' + pos.dir.toUpperCase() + ' → ' + (won ? 'WIN' : 'LOSS'), won ? 'g' : 'r');
+    log('Market resolved: ' + result.toUpperCase() + ' | our bet: ' + pos.dir.toUpperCase() + ' → ' + (won ? 'WIN' : 'LOSS') + ' | verifying Kalshi settled...', won ? 'g' : 'r');
 
-    // Step 3: Determine win/loss purely from market result (already confirmed above)
-    // Do NOT use balance delta for win/loss determination — too unreliable
-    // Balance delta is only used to get the real payout amount on wins
+    fetchPortfolioPositions().then(function(kps) {
+      var stillHeld = (kps || []).some(function(kp) {
+        return (kp.ticker || kp.market_ticker) === pos.ticker
+          && Math.abs(parseFloat(kp.position || 0)) > 0;
+      });
 
-    if (!won) {
-      // LOSS: straightforward — you lose the stake, no payout
-      log('LOSS: -$' + pos.stake.toFixed(2) + ' | market resolved ' + result.toUpperCase() + ', we bet ' + pos.dir.toUpperCase(), 'r');
-      settlePosition(pos, false, -pos.stake);
-    } else {
-      // WIN: calculate payout from contracts and entry price — no balance delta guessing
-      var entryCents = pos.entryPriceCents || Math.round((pos.stake / Math.max(1, pos.contracts||1)) * 100);
-      var grossPayout = (pos.contracts||1) * 1.00 * 0.99; // contracts × $1 × (1-fee)
-      var netPnl = grossPayout - pos.stake;
+      if (stillHeld) {
+        // Position still open — sell immediately and re-check with no delay
+        log('Market resolved but position still open — selling now (attempt ' + attempts + ')', 'a');
+        var currentVal = Math.max(1, won ? 95 : 3);
+        closePosition(pos, currentVal, 0);
+        pollMarketResult(pos, attempts + 1);
+        return;
+      }
 
-      // Sanity check: net P&L must be positive for a win, and less than max possible
-      var maxNet = (pos.contracts||1) * 0.99;
-      if (netPnl > maxNet) netPnl = maxNet;
-      if (netPnl < 0) netPnl = 0; // shouldn't happen but safety net
+      // Position gone from Kalshi — it has been settled
+      log('Position confirmed settled by Kalshi — recording ' + (won ? 'WIN' : 'LOSS'), won ? 'g' : 'r');
 
-      log('WIN: +$' + netPnl.toFixed(2) + ' | ' + (pos.contracts||1) + ' contracts @ ' + entryCents + 'c → payout $' + grossPayout.toFixed(2), 'g');
-      settlePosition(pos, true, netPnl);
-
-      // Fetch balance 4s after win to update display
-      setTimeout(fetchBalance, 4000);
-    }
+      if (!won) {
+        log('LOSS: -$' + pos.stake.toFixed(2), 'r');
+        settlePosition(pos, false, -pos.stake);
+      } else {
+        var grossPayout = (pos.contracts||1) * 1.00 * 0.99;
+        var netPnl = Math.max(0, grossPayout - pos.stake);
+        var maxNet = (pos.contracts||1) * 0.99;
+        if (netPnl > maxNet) netPnl = maxNet;
+        log('WIN: +$' + netPnl.toFixed(2) + ' | ' + (pos.contracts||1) + ' contracts → payout $' + grossPayout.toFixed(2), 'g');
+        settlePosition(pos, true, netPnl);
+        setTimeout(fetchBalance, 4000);
+      }
+    }).catch(function() {
+      // If positions fetch fails, fall back to settling based on market result
+      log('Could not verify position — settling based on market result', 'a');
+      if (!won) {
+        settlePosition(pos, false, -pos.stake);
+      } else {
+        var grossPayout2 = (pos.contracts||1) * 1.00 * 0.99;
+        var netPnl2 = Math.max(0, grossPayout2 - pos.stake);
+        settlePosition(pos, true, netPnl2);
+        setTimeout(fetchBalance, 4000);
+      }
+    });
 
   }).catch(function(e) {
     log('Market poll error: ' + e.message + ' — retrying', 'a');
@@ -5505,6 +5560,8 @@ function opportunityScanner() {
     var hotMarkets = markets.filter(function(m) {
       if (spreadTooWide(m)) return false;
       if (correlatedPositionExists(m._series || '')) return false;
+      // Never open a new position on a market we already hold (even opposite side)
+      if (S.positions.some(function(p) { return p.ticker === m.ticker && !p._settled; })) return false;
       var bid = parseFloat(m.yes_bid_dollars || 0) * 100;
       var ask = parseFloat(m.yes_ask_dollars || 0) * 100;
       var mid = (bid + ask) / 2;
@@ -6316,8 +6373,8 @@ function checkConnections() {
         if (upEl) { upEl.textContent = 'Synced ' + now; upEl.style.color = 'var(--tx3)'; }
         // update portfolio display
         S.cash = bal;
-        S.portfolio = S.cash; // Kalshi balance already reflects deducted stakes
-        if (!S.startPortfolio) S.startPortfolio = S.portfolio;
+        S.portfolio = S.cash + S.exposure;
+        // Don't set startPortfolio here — fetchBalance handles it properly with positionValue
         if (!PROTECTED_PRINCIPAL) PROTECTED_PRINCIPAL = S.cash;
         updateMetrics();
       } else if (d.error) {
