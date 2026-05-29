@@ -7060,9 +7060,13 @@ function beginGracefulShutdown(version) {
   }, 3000);
 }
 
-// Wire up Electron update events if available
-if (window.electronAPI && typeof window.electronAPI.onUpdateAvailable === 'function') {
-  window.electronAPI.onUpdateAvailable(function(version) {
+// Wire up Electron update events — wait for DOM ready to ensure contextBridge is fully initialized
+window.addEventListener('DOMContentLoaded', function() {
+  var api = window.electronAPI;
+  if (!api) return; // not running in Electron
+
+  if (typeof api.onUpdateAvailable === 'function')
+  api.onUpdateAvailable(function(version) {
     UPDATE_STATE.available = true;
     UPDATE_STATE.version   = version;
     log('UPDATE v' + version + ' available — downloading in background', 'b');
@@ -7073,8 +7077,8 @@ if (window.electronAPI && typeof window.electronAPI.onUpdateAvailable === 'funct
     );
   });
 
-  if (typeof window.electronAPI.onUpdateProgress === 'function')
-  window.electronAPI.onUpdateProgress(function(percent) {
+  if (typeof api.onUpdateProgress === 'function')
+  api.onUpdateProgress(function(percent) {
     var bar = document.getElementById('ubBar');
     var prog = document.getElementById('ubProgress');
     if (prog) prog.style.display = 'block';
@@ -7083,8 +7087,8 @@ if (window.electronAPI && typeof window.electronAPI.onUpdateAvailable === 'funct
     if (subEl) subEl.textContent = 'Downloading... ' + percent + '%';
   });
 
-  if (typeof window.electronAPI.onUpdateDownloaded === 'function')
-  window.electronAPI.onUpdateDownloaded(function(version) {
+  if (typeof api.onUpdateDownloaded === 'function')
+  api.onUpdateDownloaded(function(version) {
     UPDATE_STATE.downloaded = true;
     UPDATE_STATE.version    = version;
     log('UPDATE v' + version + ' ready — will install after current session', 'g');
@@ -7109,7 +7113,7 @@ if (window.electronAPI && typeof window.electronAPI.onUpdateAvailable === 'funct
       }, 10000);
     }
   });
-}
+}); // end DOMContentLoaded
 
 // ── Live chart animator ───────────────────────────────────────────
 var CHART_ANIM_INTERVAL = null;
