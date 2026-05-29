@@ -3442,26 +3442,34 @@ function runCycle() {
             }
           }
 
-          // Strike reality check — don't bet against the obvious
-          // If price is clearly above the strike target, NO on "price above X" is suicidal
-          if (qEdge.direction === 'no' && mkt.floor_strike) {
-            var strike = parseFloat(mkt.floor_strike);
-            var livePx = liveData ? liveData.price : 0;
+          // Strike reality check — hard dollar gap limits
+          // Max $70 gap: never bet YES when price is >$70 below strike, or NO when >$70 above
+          // $30 gap is fine, $70 is the hard wall
+          if (mkt.floor_strike || mkt.cap_strike) {
+            var strike  = parseFloat(mkt.floor_strike || mkt.cap_strike);
+            var livePx  = liveData ? liveData.price : 0;
             if (livePx > 0 && strike > 0) {
-              var distAbove = ((livePx - strike) / strike) * 100;
-              if (distAbove > 0.5) {
-                // Price is above strike — YES is overwhelmingly likely
-                // Betting NO means betting on a crash — block this
-                log('REALITY BLOCK: ' + asset + ' at $' + livePx.toFixed(0) + ' is ' + distAbove.toFixed(1) + '% ABOVE target $' + strike.toFixed(0) + ' — NO bet is suicidal', 'r');
-                addSignal('skip', mktTitle.substring(0,28), 0, 'price above strike — NO impossible', 50, mkt.ticker);
+              var dollarGap = livePx - strike; // positive = above strike, negative = below
+
+              // Betting YES: need price to reach or exceed strike
+              // If price is more than $70 BELOW strike — physically impossible in 15 min
+              if (qEdge.direction === 'yes' && dollarGap < -70) {
+                log('REALITY BLOCK: ' + asset + ' at $' + livePx.toFixed(0) + ' is $' + Math.abs(dollarGap).toFixed(0) + ' BELOW target $' + strike.toFixed(0) + ' — YES blocked (>$70 gap)', 'r');
+                addSignal('skip', mktTitle.substring(0,28), 0, 'price $' + Math.abs(dollarGap).toFixed(0) + ' below strike', 50, mkt.ticker);
                 updateAll(); return;
               }
-              if (distAbove < -0.5) {
-                // Price is below strike — NO is overwhelmingly likely
-                // Betting YES means betting on a surge — block this too
-                log('REALITY BLOCK: ' + asset + ' at $' + livePx.toFixed(0) + ' is ' + Math.abs(distAbove).toFixed(1) + '% BELOW target $' + strike.toFixed(0) + ' — YES bet is suicidal', 'r');
-                addSignal('skip', mktTitle.substring(0,28), 0, 'price below strike — YES impossible', 50, mkt.ticker);
+
+              // Betting NO: need price to stay below strike
+              // If price is more than $70 ABOVE strike — YES is overwhelmingly locked in
+              if (qEdge.direction === 'no' && dollarGap > 70) {
+                log('REALITY BLOCK: ' + asset + ' at $' + livePx.toFixed(0) + ' is $' + dollarGap.toFixed(0) + ' ABOVE target $' + strike.toFixed(0) + ' — NO blocked (>$70 gap)', 'r');
+                addSignal('skip', mktTitle.substring(0,28), 0, 'price $' + dollarGap.toFixed(0) + ' above strike', 50, mkt.ticker);
                 updateAll(); return;
+              }
+
+              // Warn but allow: $30-$70 gap — log it so we can see the risk
+              if (Math.abs(dollarGap) > 30) {
+                log('GAP WARNING: $' + Math.abs(dollarGap).toFixed(0) + ' from strike $' + strike.toFixed(0) + ' — proceeding with caution', 'a');
               }
             }
           }
@@ -4057,15 +4065,11 @@ function isMarketSane(mkt, prices) {
       if (!liveData) return;
       var currentPrice = liveData.price;
 
-      // How far is the target from current price?
-      var distancePct = Math.abs((target - currentPrice) / currentPrice) * 100;
-
-      // For 15-minute markets: target more than 3% away = physically unreachable
-      // For hourly markets: target more than 8% away = extremely unlikely
-      var maxReachable = (mkt._series || '').includes('15M') ? 3 : 8;
-
-      if (distancePct > maxReachable) {
-        return { ok: false, reason: asset + ' at $' + currentPrice.toLocaleString() + ', target $' + target.toLocaleString() + ' is ' + distancePct.toFixed(1) + '% away — physically unreachable in window' };
+      // Hard dollar gap limit: never trade if target is >$70 from current price
+      // $30 gap is acceptable, $70 is the absolute wall
+      var dollarDistance = Math.abs(target - currentPrice);
+      if (dollarDistance > 70) {
+        return { ok: false, reason: asset + ' at $' + currentPrice.toLocaleString() + ', target $' + target.toLocaleString() + ' is $' + dollarDistance.toFixed(0) + ' away — exceeds $70 limit' };
       }
     });
   }
