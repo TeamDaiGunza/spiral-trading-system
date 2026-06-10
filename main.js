@@ -149,6 +149,15 @@ const server = http.createServer(async (req, res) => {
     catch { res.writeHead(500); return res.end('mobile.html not found'); }
   }
 
+  // ── Fear & Greed Index proxy (alternative.me — CORS blocked from browser) ──
+  if (reqPath === '/fng') {
+    try {
+      const r = await httpsReq({ hostname: 'api.alternative.me', path: '/fng/?limit=1', method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } });
+      jsonResp(res, r.status, r.body);
+    } catch (e) { jsonResp(res, 500, { error: e.message }); }
+    return;
+  }
+
   // ── Coinbase public market data proxy (replaces Binance — US-accessible) ──
   if (reqPath.startsWith('/coinbase/')) {
     const coinbasePath = reqPath.slice('/coinbase'.length) + (parsed.search || '');

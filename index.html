@@ -2133,33 +2133,71 @@ function callClaudeDual(prompt1, prompt2) {
     }
     log('Signal 1: ' + s1.direction + ' (' + s1.confidence + '% conf, edge ' + (s1.edge*100).toFixed(1) + '%) | Signal 2: ' + s2.direction + ' (' + s2.confidence + '% conf, edge ' + (s2.edge*100).toFixed(1) + '%)', 'b');
 
-    // Both must agree on direction
-    if (s1.direction !== s2.direction || s1.direction === 'skip' || s2.direction === 'skip') {
-      log('Dual-confirmation FAILED: ' + s1.direction + ' vs ' + s2.direction + ' — skipping', 'a');
+    // Extreme fear/greed is a contrarian signal — relax dual confirmation
+    var fg = (MARKET_INTEL && MARKET_INTEL.fearGreed && MARKET_INTEL.fearGreed.value) || 50;
+    var extremeSentiment = fg <= 15 || fg >= 85;
+
+    // Direction check — allow YES/NO vs SKIP in extreme sentiment (contrarian edge)
+    var dir1 = s1.direction, dir2 = s2.direction;
+    var bothSkip = dir1 === 'skip' && dir2 === 'skip';
+    var oneSkip  = (dir1 === 'skip') !== (dir2 === 'skip');
+    var disagree = dir1 !== dir2 && !oneSkip;
+
+    if (disagree) {
+      log('Dual-confirmation FAILED: ' + dir1 + ' vs ' + dir2 + ' — signals disagree', 'a');
       return { direction: 'skip', confidence: 0, p: 0.5, b: 1, reason: 'signals disagree', edge: 0 };
     }
 
-    // Both must have minimum confidence — a weak confirm is not a confirm
+    // Both SKIP — in extreme sentiment allow quant to override if it has strong conviction
+    if (bothSkip) {
+      var quantDir = (typeof mkt !== 'undefined' && mkt && mkt._quantEdge) ? mkt._quantEdge.direction : 'skip';
+      var quantEdge = (typeof mkt !== 'undefined' && mkt && mkt._quantEdge) ? mkt._quantEdge.absEdge : 0;
+      if (extremeSentiment && quantDir !== 'skip' && quantEdge >= 0.20) {
+        log('Dual-confirmation: both AI skip but quant ' + quantDir.toUpperCase() + ' at ' + (quantEdge*100).toFixed(0) + '% edge in extreme sentiment — allowing quant override', 'a');
+        return { direction: quantDir, confidence: 52, p: 0.52, b: 1, edge: quantEdge, reason: 'quant override in extreme sentiment' };
+      }
+      log('Dual-confirmation FAILED: SKIP vs SKIP — skipping', 'a');
+      return { direction: 'skip', confidence: 0, p: 0.5, b: 1, reason: 'both skipped', edge: 0 };
+    }
+
+    // In extreme sentiment, allow one SKIP — use the non-skip signal at reduced confidence
+    var finalDir, base1, base2;
+    if (oneSkip && extremeSentiment) {
+      var strong = dir1 !== 'skip' ? s1 : s2;
+      log('Dual-confirmation: extreme sentiment override — taking ' + strong.direction + ' signal solo at reduced confidence (fg=' + fg + ')', 'a');
+      finalDir = strong.direction;
+      base1 = strong; base2 = strong;
+    } else if (oneSkip) {
+      log('Dual-confirmation FAILED: ' + dir1 + ' vs ' + dir2 + ' — one skip, no extreme sentiment', 'a');
+      return { direction: 'skip', confidence: 0, p: 0.5, b: 1, reason: 'signals disagree', edge: 0 };
+    } else {
+      finalDir = dir1; base1 = s1; base2 = s2;
+    }
+
+    // Minimum confidence — in extreme sentiment, lower bar slightly
     var minConf = S.consLoss >= 6 ? 68 : S.consLoss >= 3 ? 63 : 58;
-    if (s1.confidence < minConf || s2.confidence < minConf) {
-      log('Dual-confirmation WEAK: confidence ' + s1.confidence + '% / ' + s2.confidence + '% — need ' + minConf + '%+ both', 'a');
+    if (oneSkip && extremeSentiment) minConf = Math.max(minConf - 5, 52); // relax 5pts for contrarian
+    var avgConf = Math.round((base1.confidence + base2.confidence) / 2);
+    if (avgConf < minConf) {
+      log('Dual-confirmation WEAK: avg confidence ' + avgConf + '% — need ' + minConf + '%+', 'a');
       return { direction: 'skip', confidence: 0, p: 0.5, b: 1, reason: 'insufficient confidence', edge: 0 };
     }
 
-    // Both must agree edge is positive
-    if (s1.edge <= 0 || s2.edge <= 0) {
-      log('Dual-confirmation NEGATIVE EV: edge ' + (s1.edge*100).toFixed(1) + '% / ' + (s2.edge*100).toFixed(1) + '% — skipping', 'a');
+    // Average edge — not minimum (one cautious call shouldn't nuke the trade)
+    var avgEdge = (base1.edge + base2.edge) / 2;
+    if (avgEdge <= 0) {
+      log('Dual-confirmation NEGATIVE EV: avg edge ' + (avgEdge*100).toFixed(1) + '% — skipping', 'a');
       return { direction: 'skip', confidence: 0, p: 0.5, b: 1, reason: 'negative edge', edge: 0 };
     }
 
-    // Take the CONSERVATIVE values — not the average
+    var confirmed = oneSkip ? 'sentiment override' : 'dual confirmed';
     return {
-      direction: s1.direction,
-      confidence: Math.min(s1.confidence, s2.confidence), // lower of the two
-      p: Math.min(s1.p, s2.p),                            // less optimistic probability
-      b: Math.min(s1.b, s2.b),                            // worse payout assumption
-      edge: Math.min(s1.edge, s2.edge),                   // lower edge estimate
-      reason: s1.reason + ' | ' + s2.reason + ' [dual confirmed]'
+      direction: finalDir,
+      confidence: avgConf,
+      p: (base1.p + base2.p) / 2,
+      b: (base1.b + base2.b) / 2,
+      edge: avgEdge,
+      reason: base1.reason + (oneSkip ? '' : ' | ' + base2.reason) + ' [' + confirmed + ']'
     };
   });
 }
@@ -2180,7 +2218,8 @@ function callClaudeChat(systemPrompt, userMessage) {
   });
 }
 
-function callClaude(prompt) {
+function callClaude(prompt, _retry) {
+  _retry = _retry || 0;
   return apiFetch(PROXY + '/claude', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2191,6 +2230,16 @@ function callClaude(prompt) {
       messages: [{ role: 'user', content: prompt }]
     })
   }).then(function(d) {
+    // 529 = Anthropic overloaded — retry with backoff
+    if (d && d.error && (d.error.type === 'overloaded_error' || (d.error.status || 0) === 529)) {
+      if (_retry < 3) {
+        var wait = (_retry + 1) * 9000 + Math.random() * 4000;
+        log('Claude API overloaded — retry ' + (_retry+1) + '/3 in ' + Math.round(wait/1000) + 's', 'a');
+        return new Promise(function(res) { setTimeout(res, wait); }).then(function() { return callClaude(prompt, _retry + 1); });
+      }
+      log('Claude API overloaded — giving up after 3 retries', 'r');
+      return { direction: 'skip', confidence: 0, edge: 0, p: 0.5, b: 1, reason: '529 overload' };
+    }
     if (d.error) throw new Error(d.error.message || JSON.stringify(d.error));
     var raw = d.content.map(function(x) { return x.text || ''; }).join('');
 
@@ -2429,7 +2478,7 @@ var MARKET_INTEL = {
 function fetchFearGreed() {
   var now = Date.now();
   if (now - MARKET_INTEL.lastFGFetch < 180000) return Promise.resolve(MARKET_INTEL.fearGreed); // refresh every 3 min
-  return fetch('https://api.alternative.me/fng/?limit=1')
+  return fetch('http://localhost:3456/fng')
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.data && d.data[0]) {
@@ -2595,8 +2644,7 @@ function isInRecoveryMode() {
   if (!MARKET_INTEL.sessionPeak || MARKET_INTEL.sessionPeak <= 0) return false;
   var dd = (MARKET_INTEL.sessionPeak - S.pnl) / Math.max(1, Math.abs(MARKET_INTEL.sessionPeak));
   if (dd >= 0.1) {
-    log('Recovery mode: drawdown from peak ' + (dd*100).toFixed(1) + '% - using conservative sizing', 'a');
-    return true;
+    return true; // log suppressed — called too frequently inside Kelly calc
   }
   return false;
 }
@@ -3162,6 +3210,21 @@ function parallelScan(markets) {
   if (!candidates.length) return null;
   // score every candidate
   candidates.forEach(function(m) { m._score = scoreMarket(m); });
+
+  // In extreme fear with rising prices, boost YES setups — NO bets will get velocity/reality blocked
+  var fg = (MARKET_INTEL && MARKET_INTEL.fearGreed && MARKET_INTEL.fearGreed.value) || 50;
+  var extremeFear = fg <= 15;
+  if (extremeFear) {
+    candidates.forEach(function(m) {
+      var bid = parseFloat(m.yes_bid_dollars || 0) * 100;
+      var ask = parseFloat(m.yes_ask_dollars || 0) * 100;
+      var mid = (bid + ask) / 2;
+      // YES setups: priced 20-55c (price likely to stay above strike = NO is risky)
+      // Boost these in extreme fear since market is oversold and reversals are likely
+      if (mid >= 20 && mid <= 55) m._score += 0.15;
+    });
+  }
+
   candidates.sort(function(a, b) { return b._score - a._score; });
   log('Parallel scan: ' + candidates.length + ' candidates | best: ' + (candidates[0]._label || candidates[0]._series) + ' score=' + candidates[0]._score.toFixed(2), 'b');
   return candidates[0]; // return highest-scored market
@@ -3305,7 +3368,7 @@ function runCycle() {
         fetchRecentTrades(mkt.ticker)
       ]).then(function(res2) {
         var ob = res2[0];
-        var liveData = prices[assetCode] || prices.BTC || null;
+        var liveData = prices[assetCode] || null; // no BTC fallback — wrong asset price causes bad reality blocks
         var priceCtx = liveData
           ? 'Current live price: $' + liveData.price.toLocaleString() + ' | 24h: ' + liveData.change24h.toFixed(2) + '%'
           : 'Live price unavailable';
@@ -3418,7 +3481,7 @@ function runCycle() {
           // Raise edge bar during losing streaks
           if (S.consLoss >= 5) minEdge = Math.max(minEdge, 0.04); // 4% min after 5 losses
           if (S.consLoss >= 7) minEdge = Math.max(minEdge, 0.06); // 6% min after 7 losses
-          if (mkt._riskyNo)    minEdge = Math.max(minEdge, 0.05); // NO within 0.5% of strike
+          if (mkt._riskyNo)    minEdge = Math.max(minEdge, 0.03); // NO within 0.5% of strike
 
           // Hard block: if AI and quant disagree on direction, skip always
           var quantAgrees = qEdge.direction === 'skip' || qEdge.direction === dir;
@@ -5238,7 +5301,7 @@ function forceRunCycle() {
         var yesPrice  = Math.round(yesAskRaw * 100);
         if (yesPrice < 1 || yesPrice > 99) yesPrice = 50;
         var is15m = seriesKey.includes('15M');
-        var liveData = prices[assetCode] || prices.BTC || null;
+        var liveData = prices[assetCode] || null; // no BTC fallback — wrong asset price causes bad reality blocks
         var priceCtx = liveData
           ? 'Live: $' + liveData.price.toLocaleString() + ' | 24h: ' + liveData.change24h.toFixed(2) + '%'
           : 'Live price unavailable';
@@ -5410,7 +5473,7 @@ function opportunityScanner() {
 
     return Promise.all([fetchLivePrices(), fetchOrderbook(mkt.ticker)]).then(function(res) {
       var prices = res[0], ob = res[1];
-      var liveData = prices[assetCode] || prices.BTC || null;
+      var liveData = prices[assetCode] || null; // no BTC fallback — wrong asset price causes bad reality blocks
       var priceCtx = liveData ? 'Live: $' + liveData.price.toLocaleString() + ' | 24h: ' + liveData.change24h.toFixed(2) + '%' : '';
       var obCtx = ob ? ' | Orderbook: ' + orderbookSummary(ob) : '';
 
